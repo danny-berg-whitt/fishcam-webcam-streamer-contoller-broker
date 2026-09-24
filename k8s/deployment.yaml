@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webcam
+  labels:
+    app: webcam
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # one physical webcam; two pods must never contend for it
+  selector:
+    matchLabels:
+      app: webcam
+  template:
+    metadata:
+      labels:
+        app: webcam
+    spec:
+      nodeSelector:
+        fishcam.berg-whitt.com/webcam: "c922"
+      containers:
+        - name: streamer
+          image: drwhitt/fishcam-streamer:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true   # unavoidable for USB device access
+          envFrom:
+            - configMapRef:
+                name: webcam-config
+          volumeMounts:
+            - { name: dev-video0, mountPath: /dev/video0 }
+            - { name: dev-snd, mountPath: /dev/snd }
+
+        - name: controller
+          image: drwhitt/fishcam-controller:latest
+          imagePullPolicy: Always
+          # No Service selects this container's port directly anymore — the
+          # broker reaches it over pod loopback only. Left as a distinct
+          # containerPort for `kubectl port-forward` during troubleshooting.
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: STREAMER_URL
+              value: "http://127.0.0.1:8081"
+            - name: ROUTE_PREFIX
+              valueFrom:
+                configMapKeyRef: { name: webcam-config, key: ROUTE_PREFIX }
+            - name: HMAC_SECRET
+              valueFrom:
+                secretKeyRef: { name: webcam-hmac, key: HMAC_SECRET }
+          securityContext:
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+
+        - name: broker
+          image: drwhitt/fishcam-broker:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8082
+          env:
+            - name: LISTEN_ADDR
+              value: ":8082"
+            - name: CONTROLLER_URL
+              value: "http://127.0.0.1:8080"
+            - name: ROUTE_PREFIX
+              valueFrom:
+                configMapKeyRef: { name: webcam-config, key: ROUTE_PREFIX }
+            - name: HMAC_SECRET
+              valueFrom:
+                secretKeyRef: { name: webcam-hmac, key: HMAC_SECRET }
+            - name: TOKENS_FILE
+              value: "/etc/broker/tokens.json"
+          volumeMounts:
+            - name: broker-tokens
+              mountPath: /etc/broker
+              readOnly: true
+          securityContext:
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+
+      volumes:
+        - name: dev-video0
+          hostPath: { path: /dev/video0 }
+        - name: dev-snd
+          hostPath: { path: /dev/snd }
+        - name: broker-tokens
+          secret:
+            secretName: webcam-broker-tokens

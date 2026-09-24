@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: webcam-broker-service
+spec:
+  selector:
+    app: webcam
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082
+
+# No Service selects the controller's 8080 anymore. It is reachable only
+# over pod loopback (from the broker) and via `kubectl port-forward` for
+# troubleshooting, matching the Recreate/single-pod design elsewhere.
