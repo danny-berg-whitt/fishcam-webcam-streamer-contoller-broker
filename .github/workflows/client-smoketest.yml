@@ -1,0 +1,87 @@
+name: client smoketest
+
+# Minimal checks for the Flutter app: static analysis, unit and widget
+# tests with no network or device, then a compile for web and Android.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "client/flutter/**"
+      - ".github/workflows/client-smoketest.yml"
+  pull_request:
+    paths:
+      - "client/flutter/**"
+      - ".github/workflows/client-smoketest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: client/flutter
+
+jobs:
+  analyze-and-test:
+    name: analyze + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # pubspec.lock requires Flutter >= 3.38.4 / Dart >= 3.11, so track
+      # stable rather than pinning an older release.
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter --version
+
+      - run: flutter pub get
+
+      # Warnings and errors fail the job; lint "info" hints are reported
+      # but don't block a smoke test.
+      - name: flutter analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: flutter test
+        run: flutter test --reporter expanded
+
+  build:
+    name: build · ${{ matrix.target }}
+    needs: analyze-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [web, android]
+    steps:
+      - uses: actions/checkout@v7
+
+      # android/app/build.gradle.kts targets Java 17.
+      - if: matrix.target == 'android'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: flutter build web
+        if: matrix.target == 'web'
+        run: flutter build web --release
+
+      - name: flutter build apk (debug, unsigned)
+        if: matrix.target == 'android'
+        run: flutter build apk --debug

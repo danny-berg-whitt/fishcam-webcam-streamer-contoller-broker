@@ -1,0 +1,229 @@
+name: server smoketest
+
+# Minimal checks for the server side: the broker (unit tests plus a real
+# container run with the pod's security settings), the k8s manifests, and
+# the streamer and controller. The last two are checked only if their
+# source is in the repo, and are skipped with a warning otherwise.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "broker/**"
+      - "streamer/**"
+      - "controller/**"
+      - "k8s/**"
+      - ".github/workflows/server-smoketest.yml"
+  pull_request:
+    paths:
+      - "broker/**"
+      - "streamer/**"
+      - "controller/**"
+      - "k8s/**"
+      - ".github/workflows/server-smoketest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  broker:
+    name: broker · fmt, vet, test, cross-compile
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: broker/go.mod
+          cache: false # the broker has no dependencies, so there is nothing to cache
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -count=1 -v ./...
+
+      - name: Cross-compile for the Pi (linux/arm64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /dev/null .
+
+  broker-image:
+    name: broker · image build and container smoke run
+    needs: broker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # The runtime stage is FROM scratch with no RUN, and the build stage
+      # runs on $BUILDPLATFORM, so arm64 builds here without QEMU.
+      - name: Build linux/amd64 + linux/arm64 (not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: broker
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=broker
+          cache-to: type=gha,mode=max,scope=broker
+
+      - name: Load linux/amd64 image for a local run
+        uses: docker/build-push-action@v7
+        with:
+          context: broker
+          platforms: linux/amd64
+          load: true
+          tags: fishcam-broker:smoke
+          cache-from: type=gha,scope=broker
+
+      - name: Refuses to start without HMAC_SECRET
+        run: |
+          if docker run --rm fishcam-broker:smoke; then
+            echo "::error::broker started without HMAC_SECRET"
+            exit 1
+          fi
+
+      - name: Run with the pod's securityContext and probe it
+        run: |
+          set -euo pipefail
+
+          token=$(openssl rand -hex 32)
+          hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+          tokens_dir="$RUNNER_TEMP/broker-tokens"
+          mkdir -p "$tokens_dir"
+          printf '{"%s":"ci"}' "$hash" > "$tokens_dir/tokens.json"
+          chmod 0755 "$tokens_dir"
+          chmod 0644 "$tokens_dir/tokens.json" # readable by uid 65534
+
+          # CONTROLLER_URL points at a closed port, so authenticated calls
+          # prove the broker got as far as signing and forwarding (502).
+          docker run -d --name broker -p 8082:8082 \
+            --read-only --user 65534:65534 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -e HMAC_SECRET="$(openssl rand -hex 32)" \
+            -e ROUTE_PREFIX=/webcam \
+            -e CONTROLLER_URL=http://127.0.0.1:9 \
+            -v "$tokens_dir:/etc/broker:ro" \
+            fishcam-broker:smoke
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:8082/healthz >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+
+          fail=0
+          check() {
+            local want=$1 desc=$2; shift 2
+            local got
+            got=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+            if [ "$got" = "$want" ]; then
+              echo "ok   $want  $desc"
+            else
+              echo "::error::$desc: got HTTP $got, want $want"
+              fail=1
+            fi
+          }
+          base=http://localhost:8082
+          auth="Authorization: Bearer $token"
+
+          check 200 "healthz is unauthenticated"       "$base/healthz"
+          check 404 "healthz is not prefixed"          "$base/webcam/healthz"
+          check 401 "no token"                         -X POST "$base/webcam/mute"
+          check 401 "unknown token"                    -X POST -H "Authorization: Bearer $(openssl rand -hex 32)" "$base/webcam/mute"
+          check 405 "GET cannot mute"                  -H "$auth" "$base/webcam/mute"
+          check 404 "unprefixed path is not served"    -X POST -H "$auth" "$base/mute"
+          check 502 "valid token reaches the upstream" -H "$auth" "$base/webcam/status"
+
+          docker logs broker 2>&1 | grep -q "loaded 1 user token" \
+            || { echo "::error::token file was not loaded"; fail=1; }
+
+          exit $fail
+
+      - name: Broker logs
+        if: always()
+        run: docker logs broker 2>&1 || true
+
+  manifests:
+    name: k8s · manifest schema validation
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" kubeconform
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Validate
+        run: kubeconform -strict -summary -output text k8s/*.yaml
+
+  go-component:
+    name: ${{ matrix.component }} · vet, test, image build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [streamer, controller]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Is the source in this repo?
+        id: src
+        run: |
+          if [ -f "${{ matrix.component }}/go.mod" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=${{ matrix.component }} not tested::${{ matrix.component }}/go.mod is not in this repository, so its checks were skipped."
+          fi
+
+      - if: steps.src.outputs.present == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.component }}/go.mod
+          cache-dependency-path: ${{ matrix.component }}/go.*
+
+      - name: go vet
+        if: steps.src.outputs.present == 'true'
+        working-directory: ${{ matrix.component }}
+        run: go vet ./...
+
+      - name: go test
+        if: steps.src.outputs.present == 'true'
+        working-directory: ${{ matrix.component }}
+        run: go test -race -count=1 ./...
+
+      - if: steps.src.outputs.present == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      # amd64 only: on this runner that's native, so the streamer's `apk`
+      # install and its ffmpeg capability assertions run without QEMU. The
+      # arm64 path is already exercised by the broker job's cross-build.
+      - name: Build image (linux/amd64, not pushed)
+        if: steps.src.outputs.present == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.component }}
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
