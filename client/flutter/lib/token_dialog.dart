@@ -38,7 +38,7 @@ class _UserTokenDialogState extends State<_UserTokenDialog> {
   }
 
   String? _validate(String? value) {
-    final trimmed = value?.trim() ?? '';
+    final trimmed = value?.trim().toLowerCase() ?? '';
     if (trimmed.isEmpty) return 'Access code is required';
     if (!_hexTokenPattern.hasMatch(trimmed)) {
       return 'Expected 64 hex characters, as given to you by the admin';
@@ -48,7 +48,8 @@ class _UserTokenDialogState extends State<_UserTokenDialog> {
 
   void _submit() {
     if (_formKey.currentState!.validate()) {
-      Navigator.of(context).pop(_controller.text.trim());
+      // Tokens are minted lowercase; normalise so an uppercase paste works.
+      Navigator.of(context).pop(_controller.text.trim().toLowerCase());
     }
   }
 

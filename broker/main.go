@@ -35,6 +35,15 @@ func main() {
 	}
 	log.Printf("[broker] loaded %d user token(s) from %s", len(users), cfg.TokensFile)
 
+	mux := newMux(cfg, users)
+
+	log.Printf("[broker] listening on %s, prefix %q, forwarding to %s", cfg.ListenAddr, cfg.RoutePrefix, cfg.ControllerURL)
+	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
+}
+
+// newMux wires the broker's routes. Split out of main so tests exercise the
+// exact routing (including ROUTE_PREFIX mounting) that production serves.
+func newMux(cfg *config, users map[string]string) *http.ServeMux {
 	h := &handler{cfg: cfg, users: users, client: &http.Client{Timeout: cfg.UpstreamTimeout}}
 
 	mux := http.NewServeMux()
@@ -42,9 +51,7 @@ func main() {
 	mux.HandleFunc(cfg.RoutePrefix+"/mute", h.authenticated(h.proxyAction("mute", http.MethodPost)))
 	mux.HandleFunc(cfg.RoutePrefix+"/unmute", h.authenticated(h.proxyAction("unmute", http.MethodPost)))
 	mux.HandleFunc(cfg.RoutePrefix+"/status", h.authenticated(h.proxyAction("status", http.MethodGet)))
-
-	log.Printf("[broker] listening on %s, prefix %q, forwarding to %s", cfg.ListenAddr, cfg.RoutePrefix, cfg.ControllerURL)
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
+	return mux
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +191,15 @@ func (h *handler) authenticated(next http.HandlerFunc) http.HandlerFunc {
 // it, then relays the Controller's response back to the caller verbatim.
 func (h *handler) proxyAction(action, method string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The broker signs with its own fixed method, so without this check
+		// an authenticated GET /mute (a link preview, a browser prefetch)
+		// would be forwarded as a signed POST and actually mute the mic.
+		if r.Method != method {
+			w.Header().Set("Allow", method)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		username, _ := userFromContext(r.Context())
 		path := h.cfg.RoutePrefix + "/" + action
 

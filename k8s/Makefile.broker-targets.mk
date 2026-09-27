@@ -42,5 +42,5 @@ broker-add-user:
 
 broker-list-users:
 	@kubectl get secret webcam-broker-tokens -o jsonpath='{.data.tokens\.json}' \
-	  | base64 -d | python3 -m json.tool | grep -v '^\s*"[0-9a-f]\{64\}"' || true
+	  | base64 -d | python3 -c "import json,sys; print('\n'.join(sorted(json.load(sys.stdin).values())))"
 	@echo "(usernames only shown; token hashes omitted)"

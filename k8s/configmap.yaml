@@ -14,6 +14,14 @@ metadata:
   labels:
     app: webcam
 data:
+  # --- Routing -----------------------------------------------------------
+  # Read by the controller and the broker (not the streamer) through
+  # configMapKeyRef in deployment.yaml. That reference is not optional, so
+  # without this key both containers fail with CreateContainerConfigError.
+  # Public paths become /webcam/mute etc., and the broker signs the same
+  # prefixed path when it calls the controller.
+  ROUTE_PREFIX: "/webcam"
+
   # --- Destination -------------------------------------------------------
   RTMP_URL: "rtmp://hls-service.default.svc.cluster.local/live/stream"
 

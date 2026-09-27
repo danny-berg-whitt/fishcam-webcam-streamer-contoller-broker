@@ -1,9 +1,9 @@
 name: server smoketest
 
-# Minimal checks for the server side: the broker (unit tests plus a real
-# container run with the pod's security settings), the k8s manifests, and
-# the streamer and controller. The last two are checked only if their
-# source is in the repo, and are skipped with a warning otherwise.
+# Minimal checks for the server side: each Go component's unit tests and
+# image build, a real broker container run with the pod's security
+# settings, the k8s manifests, and an end-to-end run of broker -> controller
+# -> stub streamer to prove the two halves of the HMAC scheme agree.
 
 on:
   push:
@@ -13,6 +13,7 @@ on:
       - "streamer/**"
       - "controller/**"
       - "k8s/**"
+      - "ci/**"
       - ".github/workflows/server-smoketest.yml"
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - "streamer/**"
       - "controller/**"
       - "k8s/**"
+      - "ci/**"
       - ".github/workflows/server-smoketest.yml"
   workflow_dispatch:
 
@@ -173,8 +175,39 @@ jobs:
             | tar -xz -C "$RUNNER_TEMP" kubeconform
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
-      - name: Validate
+      - name: Validate schemas
         run: kubeconform -strict -summary -output text k8s/*.yaml
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      # kubeconform can't see that a configMapKeyRef names a key the
+      # ConfigMap doesn't define; that only fails at runtime.
+      - name: Cross-check ConfigMap references
+        run: |
+          pip install --quiet pyyaml
+          python ci/check_manifest_refs.py
+
+  e2e:
+    name: e2e · broker → controller → stub streamer
+    needs: [broker, go-component]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: controller/go.mod
+          cache: false
+
+      - name: Build controller and broker
+        run: |
+          go build -C controller -o "$RUNNER_TEMP/controller" .
+          go build -C broker     -o "$RUNNER_TEMP/broker" .
+
+      - name: Run the request chain
+        run: ci/e2e-smoke.sh "$RUNNER_TEMP/controller" "$RUNNER_TEMP/broker"
 
   go-component:
     name: ${{ matrix.component }} · vet, test, image build
@@ -201,6 +234,17 @@ jobs:
         with:
           go-version-file: ${{ matrix.component }}/go.mod
           cache-dependency-path: ${{ matrix.component }}/go.*
+
+      - name: gofmt
+        if: steps.src.outputs.present == 'true'
+        working-directory: ${{ matrix.component }}
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
 
       - name: go vet
         if: steps.src.outputs.present == 'true'
