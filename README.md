@@ -453,6 +453,55 @@ Controller's proxy behaviour, and the Broker's token lookup and signing:
 make test
 ```
 
+### Running CI locally with act
+
+Both GitHub Actions workflows (`.github/workflows/`) also run locally with
+[act](https://github.com/nektos/act), natively on an arm64 container, so
+an Apple Silicon Mac needs no x86 emulation (no Rosetta, no QEMU). With
+podman:
+
+```sh
+# One-time cleanup if act has previously run here with another architecture
+podman rmi -f ghcr.io/catthehacker/ubuntu:act-latest
+podman volume rm act-toolcache
+
+act --container-architecture linux/arm64 \
+    --container-daemon-socket <socket path inside the podman VM>
+```
+
+`--container-architecture` must be `os/arch`. act splits the value on `/`,
+so a bare `arm64` never selects arm64: the image comes from whatever
+architecture was already pulled. The socket path is the tail of the URI
+that `podman system connection list` shows, e.g.
+`/run/user/501/podman/podman.sock`.
+
+To confirm the image is really arm64 before running:
+
+```sh
+podman run --rm ghcr.io/catthehacker/ubuntu:act-latest \
+  sh -c 'uname -m; node -p process.arch'   # expect: aarch64, arm64
+```
+
+What differs under act (steps check `env.ACT`, which act sets and GitHub
+doesn't):
+
+- Flutter comes from a git checkout of the stable channel
+  (`ci/flutter-sdk.sh`) instead of `subosito/flutter-action`, because
+  Flutter's Linux release downloads are x64 only. The first run clones it
+  and downloads the SDK; the `act-toolcache` volume keeps it for later runs.
+- The Android build is skipped: act's image has no Android SDK, and
+  Google's Linux Android build tools are x86-64 only.
+- `go test` runs without `-race`, since act's image has no C compiler.
+- Docker builds use no `type=gha` cache, which needs GitHub's cache service.
+
+The image-building jobs drive podman through `docker buildx`, which is the
+least reliable part of this setup. If they fail, run the rest by job:
+
+```sh
+act -j broker -j manifests -j go-component -j e2e   # server
+act -j analyze-and-test -j build                    # client
+```
+
 Publishing the API
 --
 

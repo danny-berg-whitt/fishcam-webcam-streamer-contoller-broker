@@ -4,6 +4,10 @@ name: server smoketest
 # image build, a real broker container run with the pod's security
 # settings, the k8s manifests, and an end-to-end run of broker -> controller
 # -> stub streamer to prove the two halves of the HMAC scheme agree.
+#
+# Every job also runs locally under act on an arm64 host with no x86
+# emulation (see README, "Running CI locally"). Steps that differ under act
+# are guarded with env.ACT, which act sets and GitHub never does.
 
 on:
   push:
@@ -59,8 +63,17 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # -race needs cgo and a C compiler. GitHub's runners have gcc; act's
+      # default image doesn't, so fall back to a plain run there.
       - name: go test
-        run: go test -race -count=1 -v ./...
+        run: |
+          flags=(-count=1 -v)
+          if command -v gcc >/dev/null; then
+            flags=(-race "${flags[@]}")
+          else
+            echo "::warning::No C compiler here, so the race detector is off."
+          fi
+          go test "${flags[@]}" ./...
 
       - name: Cross-compile for the Pi (linux/arm64)
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /dev/null .
@@ -82,17 +95,20 @@ jobs:
           context: broker
           platforms: linux/amd64,linux/arm64
           push: false
-          cache-from: type=gha,scope=broker
-          cache-to: type=gha,mode=max,scope=broker
+          # The gha cache needs GitHub's cache service, which act lacks.
+          cache-from: ${{ !env.ACT && 'type=gha,scope=broker' || '' }}
+          cache-to: ${{ !env.ACT && 'type=gha,mode=max,scope=broker' || '' }}
 
-      - name: Load linux/amd64 image for a local run
+      # No platform given, so this builds for the machine it runs on: amd64
+      # on GitHub, arm64 under act on Apple Silicon. Either way the image
+      # runs natively in the next steps, with no emulation.
+      - name: Load a native image for a local run
         uses: docker/build-push-action@v7
         with:
           context: broker
-          platforms: linux/amd64
           load: true
           tags: fishcam-broker:smoke
-          cache-from: type=gha,scope=broker
+          cache-from: ${{ !env.ACT && 'type=gha,scope=broker' || '' }}
 
       - name: Refuses to start without HMAC_SECRET
         run: |
@@ -169,25 +185,36 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Picks the build for this machine's architecture, and is called by
+      # its full path rather than added to $GITHUB_PATH: under act, adding
+      # to the path makes act rebuild PATH for later steps, which is where
+      # the earlier "node not found" failure came from.
       - name: Install kubeconform
         run: |
-          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+          case "$(uname -m)" in
+            x86_64)        arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::no kubeconform build for $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-${arch}.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP" kubeconform
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Validate schemas
-        run: kubeconform -strict -summary -output text k8s/*.yaml
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.x"
+        run: '"$RUNNER_TEMP/kubeconform" -strict -summary -output text k8s/*.yaml'
 
       # kubeconform can't see that a configMapKeyRef names a key the
-      # ConfigMap doesn't define; that only fails at runtime.
+      # ConfigMap doesn't define; that only fails at runtime. Uses the
+      # machine's own python3 (present on GitHub's runners and in act's
+      # image), installing PyYAML into a throwaway venv only if needed.
       - name: Cross-check ConfigMap references
         run: |
-          pip install --quiet pyyaml
-          python ci/check_manifest_refs.py
+          py=python3
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "$RUNNER_TEMP/venv"
+            "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml
+            py="$RUNNER_TEMP/venv/bin/python"
+          fi
+          "$py" ci/check_manifest_refs.py
 
   e2e:
     name: e2e · broker → controller → stub streamer
@@ -254,20 +281,27 @@ jobs:
       - name: go test
         if: steps.src.outputs.present == 'true'
         working-directory: ${{ matrix.component }}
-        run: go test -race -count=1 ./...
+        run: |
+          flags=(-count=1)
+          if command -v gcc >/dev/null; then
+            flags=(-race "${flags[@]}")
+          else
+            echo "::warning::No C compiler here, so the race detector is off."
+          fi
+          go test "${flags[@]}" ./...
 
       - if: steps.src.outputs.present == 'true'
         uses: docker/setup-buildx-action@v4
 
-      # amd64 only: on this runner that's native, so the streamer's `apk`
-      # install and its ffmpeg capability assertions run without QEMU. The
-      # arm64 path is already exercised by the broker job's cross-build.
-      - name: Build image (linux/amd64, not pushed)
+      # Native platform only (amd64 on GitHub, arm64 under act on Apple
+      # Silicon), so the streamer's `apk` install and its ffmpeg capability
+      # assertions never run under emulation. The broker job's multi-arch
+      # build already covers cross-building.
+      - name: Build image (native platform, not pushed)
         if: steps.src.outputs.present == 'true'
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.component }}
-          platforms: linux/amd64
           push: false
-          cache-from: type=gha,scope=${{ matrix.component }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          cache-from: ${{ !env.ACT && format('type=gha,scope={0}', matrix.component) || '' }}
+          cache-to: ${{ !env.ACT && format('type=gha,mode=max,scope={0}', matrix.component) || '' }}

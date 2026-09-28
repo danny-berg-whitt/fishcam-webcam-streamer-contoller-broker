@@ -2,6 +2,11 @@ name: client smoketest
 
 # Minimal checks for the Flutter app: static analysis, unit and widget
 # tests with no network or device, then a compile for web and Android.
+#
+# Under act (env.ACT is set) Flutter comes from a git checkout via
+# ci/flutter-sdk.sh instead of subosito/flutter-action, whose Linux
+# downloads are x64-only; that lets this run natively on an arm64
+# container. The Android build is skipped under act.
 
 on:
   push:
@@ -36,21 +41,28 @@ jobs:
       # pubspec.lock requires Flutter >= 3.38.4 / Dart >= 3.11, so track
       # stable rather than pinning an older release.
       - uses: subosito/flutter-action@v2
+        if: ${{ !env.ACT }}
         with:
           channel: stable
           cache: true
 
-      - run: flutter --version
+      # FLUTTER goes into $GITHUB_ENV rather than $GITHUB_PATH on purpose:
+      # changing the path under act makes it rebuild PATH for later steps.
+      - name: Use Flutter from a git checkout (act)
+        if: ${{ env.ACT }}
+        run: echo "FLUTTER=$GITHUB_WORKSPACE/ci/flutter-sdk.sh" >> "$GITHUB_ENV"
 
-      - run: flutter pub get
+      - run: '"${FLUTTER:-flutter}" --version'
+
+      - run: '"${FLUTTER:-flutter}" pub get'
 
       # Warnings and errors fail the job; lint "info" hints are reported
       # but don't block a smoke test.
       - name: flutter analyze
-        run: flutter analyze --no-fatal-infos
+        run: '"${FLUTTER:-flutter}" analyze --no-fatal-infos'
 
       - name: flutter test
-        run: flutter test --reporter expanded
+        run: '"${FLUTTER:-flutter}" test --reporter expanded'
 
   build:
     name: build · ${{ matrix.target }}
@@ -63,8 +75,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # act's image has no Android SDK or JDK, and Google's Linux Android
+      # build tools are x86-64 only, so there's no native arm64 route.
+      - name: Android build skipped (act)
+        if: ${{ matrix.target == 'android' && env.ACT }}
+        run: echo "::notice::Android build skipped under act; it runs on GitHub."
+
       # android/app/build.gradle.kts targets Java 17.
-      - if: matrix.target == 'android'
+      - if: ${{ matrix.target == 'android' && !env.ACT }}
         uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -72,16 +90,22 @@ jobs:
           cache: gradle
 
       - uses: subosito/flutter-action@v2
+        if: ${{ !env.ACT }}
         with:
           channel: stable
           cache: true
 
-      - run: flutter pub get
+      - name: Use Flutter from a git checkout (act)
+        if: ${{ env.ACT && matrix.target != 'android' }}
+        run: echo "FLUTTER=$GITHUB_WORKSPACE/ci/flutter-sdk.sh" >> "$GITHUB_ENV"
+
+      - if: ${{ !(matrix.target == 'android' && env.ACT) }}
+        run: '"${FLUTTER:-flutter}" pub get'
 
       - name: flutter build web
         if: matrix.target == 'web'
-        run: flutter build web --release
+        run: '"${FLUTTER:-flutter}" build web --release'
 
       - name: flutter build apk (debug, unsigned)
-        if: matrix.target == 'android'
-        run: flutter build apk --debug
+        if: ${{ matrix.target == 'android' && !env.ACT }}
+        run: '"${FLUTTER:-flutter}" build apk --debug'
