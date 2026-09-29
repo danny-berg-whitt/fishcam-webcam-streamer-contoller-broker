@@ -434,8 +434,15 @@ podman rmi -f ghcr.io/catthehacker/ubuntu:act-latest
 podman volume rm act-toolcache
 
 act --container-architecture linux/arm64 \
-    --container-daemon-socket <socket path inside the podman VM>
+    --container-daemon-socket <socket path inside the podman VM> \
+    --container-options "--security-opt label=disable"
 ```
+
+act bind-mounts that socket at `/var/run/docker.sock` in each job
+container, which is where the image jobs look for it. The podman machine
+runs Fedora CoreOS with SELinux enforcing, and a bind-mounted socket
+isn't usable from a labelled container, hence `label=disable`. To avoid
+retyping the flags, put them in an `.actrc` file, one per line.
 
 `--container-architecture` must be `os/arch`. act splits the value on `/`,
 so a bare `arm64` never selects arm64: the image comes from whatever
