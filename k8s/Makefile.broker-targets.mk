@@ -1,3 +1,7 @@
+# Kubectl command; the root Makefile auto-detects it (kubectl, or
+# `microk8s kubectl` on the Pi). Standalone use falls back to plain kubectl.
+KUBECTL ?= kubectl
+
 # Add to the project's existing Makefile.
 #
 # broker-init: creates the tokens secret with a single user, "admin".
@@ -14,7 +18,7 @@ broker-init:
 	TOKEN=$$(openssl rand -hex 32); \
 	HASH=$$(printf '%s' "$$TOKEN" | sha256sum | awk '{print $$1}'); \
 	echo "{\"$$HASH\":\"$$NAME\"}" > $(TOKENS_FILE); \
-	kubectl create secret generic webcam-broker-tokens \
+	$(KUBECTL) create secret generic webcam-broker-tokens \
 	  --from-file=tokens.json=$(TOKENS_FILE); \
 	rm -f $(TOKENS_FILE); \
 	echo ""; \
@@ -26,11 +30,11 @@ broker-add-user:
 	@test -n "$(NAME)" || (echo "usage: make broker-add-user NAME=<name>"; exit 1)
 	@TOKEN=$$(openssl rand -hex 32); \
 	HASH=$$(printf '%s' "$$TOKEN" | sha256sum | awk '{print $$1}'); \
-	kubectl get secret webcam-broker-tokens -o jsonpath='{.data.tokens\.json}' \
+	$(KUBECTL) get secret webcam-broker-tokens -o jsonpath='{.data.tokens\.json}' \
 	  | base64 -d > $(TOKENS_FILE); \
 	python3 -c "import json,sys; d=json.load(open('$(TOKENS_FILE)')); d['$$HASH']='$(NAME)'; json.dump(d, open('$(TOKENS_FILE)','w'))"; \
-	kubectl delete secret webcam-broker-tokens; \
-	kubectl create secret generic webcam-broker-tokens \
+	$(KUBECTL) delete secret webcam-broker-tokens; \
+	$(KUBECTL) create secret generic webcam-broker-tokens \
 	  --from-file=tokens.json=$(TOKENS_FILE); \
 	rm -f $(TOKENS_FILE); \
 	echo ""; \
@@ -38,9 +42,9 @@ broker-add-user:
 	echo "$$TOKEN"; \
 	echo ""; \
 	echo "Restart the broker container to pick up the change:"; \
-	echo "  kubectl rollout restart deployment/webcam"
+	echo "  $(KUBECTL) rollout restart deployment/webcam"
 
 broker-list-users:
-	@kubectl get secret webcam-broker-tokens -o jsonpath='{.data.tokens\.json}' \
+	@$(KUBECTL) get secret webcam-broker-tokens -o jsonpath='{.data.tokens\.json}' \
 	  | base64 -d | python3 -c "import json,sys; print('\n'.join(sorted(json.load(sys.stdin).values())))"
 	@echo "(usernames only shown; token hashes omitted)"

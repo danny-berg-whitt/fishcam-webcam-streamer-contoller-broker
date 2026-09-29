@@ -331,7 +331,13 @@ make secret       # generates webcam-hmac with openssl rand -hex 32
 make broker-init  # generates webcam-broker-tokens with one user ("admin")
 make deploy       # labels the webcam node, then applies the manifests
 make status
+make logs         # streamer logs; C=controller or C=broker for the others
 ```
+
+`make secret` never replaces an existing `webcam-hmac`; it prints how to
+rotate it instead. `make deploy` checks that both secrets exist before
+applying anything, and names the target to run if one is missing, rather
+than leaving the pod stuck in `CreateContainerConfigError`.
 
 `deploy` labels the node the pod's `nodeSelector` looks for
 (`fishcam.berg-whitt.com/webcam=c922`) before applying anything. On a
