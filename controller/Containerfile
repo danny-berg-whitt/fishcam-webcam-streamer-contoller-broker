@@ -1,12 +1,15 @@
 # ---------- Build stage ----------
 # Runs on the build host's native architecture and cross-compiles to the
-# target, so an amd64 workstation builds arm64 images at full speed. Alpine
-# rather than bookworm because this stage never ships — it is pure tooling,
-# and the smaller builder means smaller pulls and smaller orphaned images.
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
+# target, so arm64 images build at full speed on any host, with no emulation.
+# Chainguard's Go image rather than Docker Hub's golang image; this stage
+# never ships, so it only needs a Go toolchain (the image also has bash).
+# Chainguard publishes only the `latest` tag for free, so the Go version
+# floats; go.mod's `go` line is the minimum it must satisfy.
+FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/go:latest AS build
+USER 0
 
-# Supplied automatically by buildx / podman. Empty for a plain `docker build`,
-# in which case the build falls back to the host architecture.
+# Set automatically by podman build. The fallbacks below cover builders
+# that leave them empty, building for the host architecture.
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -29,6 +32,10 @@ RUN CGO_ENABLED=0 \
 # If it ever needs to reach an external HTTPS endpoint, add:
 #   COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 FROM scratch
+
+# Links the GHCR package to its source repository.
+LABEL org.opencontainers.image.source="https://github.com/danny-berg-whitt/fishcam-webcam-streamer-contoller-broker"
+LABEL org.opencontainers.image.description="FishCam controller: HMAC-authenticated mute/status API in front of the streamer"
 
 COPY --from=build /out/controller /usr/local/bin/controller
 

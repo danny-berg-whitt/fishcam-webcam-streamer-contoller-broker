@@ -18,9 +18,15 @@ spec:
     spec:
       nodeSelector:
         fishcam.berg-whitt.com/webcam: "c922"
+      # For pulling from GHCR while the packages are private (the default
+      # for new packages); create it with `make ghcr-pull-secret`. Once the
+      # packages are public this is unused, and a missing secret only makes
+      # the kubelet log a warning before pulling anonymously.
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: streamer
-          image: drwhitt/fishcam-streamer:latest
+          image: ghcr.io/danny-berg-whitt/fishcam-streamer:latest
           imagePullPolicy: Always
           securityContext:
             privileged: true   # unavoidable for USB device access
@@ -32,7 +38,7 @@ spec:
             - { name: dev-snd, mountPath: /dev/snd }
 
         - name: controller
-          image: drwhitt/fishcam-controller:latest
+          image: ghcr.io/danny-berg-whitt/fishcam-controller:latest
           imagePullPolicy: Always
           # No Service selects this container's port directly anymore — the
           # broker reaches it over pod loopback only. Left as a distinct
@@ -58,7 +64,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
 
         - name: broker
-          image: drwhitt/fishcam-broker:latest
+          image: ghcr.io/danny-berg-whitt/fishcam-broker:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8082

@@ -1,0 +1,78 @@
+# ---------- Build stage ----------
+# Runs on the build host's native architecture and cross-compiles to the
+# target, so the Go build itself never runs under emulation. Chainguard's Go
+# image rather than Docker Hub's golang image; this stage never ships, so it
+# only needs a Go toolchain (the image also has bash). Chainguard publishes
+# only the `latest` tag for free, so the Go version floats; go.mod's `go`
+# line is the minimum it must satisfy.
+FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/go:latest AS build
+USER 0
+
+# Set automatically by podman build. The fallbacks below cover builders
+# that leave them empty, building for the host architecture.
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /app
+
+COPY go.mod ./
+COPY *.go ./
+
+# CGO off makes this a fully static binary, so it runs unchanged on musl.
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-$(go env GOOS)} \
+    GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -trimpath -ldflags="-s -w" -o /out/streamer .
+
+# ---------- Alpine root filesystem ----------
+# Alpine's official mini root filesystem, unpacked by ADD from the tarball
+# that fetch-rootfs.sh downloads from Alpine's own mirror and checks against
+# the SHA-256 Alpine publishes. No `alpine` image is pulled from any
+# registry. Before building, run once per target architecture:
+#   streamer/fetch-rootfs.sh <amd64|arm64>
+FROM scratch AS alpine-rootfs
+ARG TARGETARCH
+ADD rootfs/alpine-minirootfs-${TARGETARCH}.tar.gz /
+
+# ---------- Runtime stage ----------
+# Alpine rather than debian-slim purely for size. Debian's ffmpeg package
+# depends on the whole optional feature surface — LLVM and Mesa for OpenCL,
+# flite for speech synthesis, pocketsphinx for speech recognition, SDL2, X11,
+# Wayland, JACK — none of which a headless V4L2 -> x264 -> RTMP pipeline
+# touches. Alpine splits ffmpeg into per-library packages and builds far less
+# maximally. (Wolfi was considered and rejected: it has no alsa-utils, so no
+# amixer for mute, and its ffmpeg is built without ALSA support.)
+#
+# Because this stage runs `apk add` for the target architecture, build it
+# natively (arm64 on the Pi or an Apple Silicon Mac) or with emulation.
+FROM alpine-rootfs
+
+# A root filesystem tarball carries no image config, so set the PATH the
+# alpine image would have; the streamer finds ffmpeg and amixer through it.
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Links the GHCR package to its source repository.
+LABEL org.opencontainers.image.source="https://github.com/danny-berg-whitt/fishcam-webcam-streamer-contoller-broker"
+LABEL org.opencontainers.image.description="FishCam streamer: USB webcam to RTMP via ffmpeg, with ALSA mute control"
+
+RUN apk add --no-cache \
+      ffmpeg \
+      alsa-utils \
+      ca-certificates
+
+# Alpine's ffmpeg build options are not guaranteed across releases, and a
+# missing encoder would otherwise surface as a dead stream at 3am rather than
+# a failed build. Assert every piece the pipeline actually needs.
+RUN set -eux; \
+    ffmpeg -hide_banner -encoders | grep -q 'libx264'; \
+    ffmpeg -hide_banner -encoders | grep -q ' aac '; \
+    ffmpeg -hide_banner -devices  | grep -q 'video4linux2'; \
+    ffmpeg -hide_banner -devices  | grep -q 'alsa'; \
+    ffmpeg -hide_banner -muxers   | grep -q 'flv'; \
+    command -v amixer
+
+COPY --from=build /out/streamer /usr/local/bin/streamer
+
+EXPOSE 8081
+
+ENTRYPOINT ["/usr/local/bin/streamer"]

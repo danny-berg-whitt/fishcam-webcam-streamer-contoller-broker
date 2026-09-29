@@ -5,9 +5,11 @@ name: server smoketest
 # settings, the k8s manifests, and an end-to-end run of broker -> controller
 # -> stub streamer to prove the two halves of the HMAC scheme agree.
 #
-# Every job also runs locally under act on an arm64 host with no x86
-# emulation (see README, "Running CI locally"). Steps that differ under act
-# are guarded with env.ACT, which act sets and GitHub never does.
+# Images are built and run with podman; nothing here uses Docker's tools,
+# actions or registries. Every job also runs locally under act on an arm64
+# host with no x86 emulation (see README, "Running CI locally"). Steps that
+# differ under act are guarded with env.ACT, which act sets and GitHub never
+# does.
 
 on:
   push:
@@ -82,37 +84,45 @@ jobs:
     name: broker · image build and container smoke run
     needs: broker
     runs-on: ubuntu-latest
+    env:
+      # Unique per run, since under act these land on your shared Podman host.
+      SMOKE: fishcam-broker-smoke-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v4
+      # GitHub's runners have podman. act's job image doesn't, so under act
+      # every podman command goes through ci/podman-act.sh, which drives the
+      # host's Podman over the socket act mounts into the job container.
+      - name: Use the host's Podman (act)
+        if: ${{ env.ACT }}
+        run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
+
+      - run: '"${PODMAN:-podman}" version'
 
       # The runtime stage is FROM scratch with no RUN, and the build stage
-      # runs on $BUILDPLATFORM, so arm64 builds here without QEMU.
+      # runs on $BUILDPLATFORM and cross-compiles, so both architectures
+      # build without emulation. The check afterwards guards against a
+      # podman layer-cache quirk that can reuse one architecture's result
+      # for the other when the per-architecture outputs are identical.
       - name: Build linux/amd64 + linux/arm64 (not pushed)
-        uses: docker/build-push-action@v7
-        with:
-          context: broker
-          platforms: linux/amd64,linux/arm64
-          push: false
-          # The gha cache needs GitHub's cache service, which act lacks.
-          cache-from: ${{ !env.ACT && 'type=gha,scope=broker' || '' }}
-          cache-to: ${{ !env.ACT && 'type=gha,mode=max,scope=broker' || '' }}
+        run: |
+          "${PODMAN:-podman}" manifest rm "$SMOKE:multi" >/dev/null 2>&1 || true
+          "${PODMAN:-podman}" build --platform linux/amd64,linux/arm64 \
+            --manifest "$SMOKE:multi" broker
+          archs=$("${PODMAN:-podman}" manifest inspect "$SMOKE:multi" \
+            | jq -r '[.manifests[].platform.architecture] | sort | join(",")')
+          echo "manifest architectures: $archs"
+          [ "$archs" = "amd64,arm64" ] || { echo "::error::expected amd64,arm64"; exit 1; }
 
-      # No platform given, so this builds for the machine it runs on: amd64
-      # on GitHub, arm64 under act on Apple Silicon. Either way the image
-      # runs natively in the next steps, with no emulation.
-      - name: Load a native image for a local run
-        uses: docker/build-push-action@v7
-        with:
-          context: broker
-          load: true
-          tags: fishcam-broker:smoke
-          cache-from: ${{ !env.ACT && 'type=gha,scope=broker' || '' }}
+      # No --platform, so this builds for the machine it runs on: amd64 on
+      # GitHub, arm64 under act on Apple Silicon. Either way the image runs
+      # natively in the next steps, with no emulation.
+      - name: Build a native image for a local run
+        run: '"${PODMAN:-podman}" build --tag "$SMOKE:native" broker'
 
       - name: Refuses to start without HMAC_SECRET
         run: |
-          if docker run --rm fishcam-broker:smoke; then
+          if "${PODMAN:-podman}" run --rm "$SMOKE:native"; then
             echo "::error::broker started without HMAC_SECRET"
             exit 1
           fi
@@ -120,25 +130,29 @@ jobs:
       - name: Run with the pod's securityContext and probe it
         run: |
           set -euo pipefail
+          podman=${PODMAN:-podman}
 
           token=$(openssl rand -hex 32)
           hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
-          tokens_dir="$RUNNER_TEMP/broker-tokens"
-          mkdir -p "$tokens_dir"
-          printf '{"%s":"ci"}' "$hash" > "$tokens_dir/tokens.json"
-          chmod 0755 "$tokens_dir"
-          chmod 0644 "$tokens_dir/tokens.json" # readable by uid 65534
+          printf '{"%s":"ci"}' "$hash" > "$RUNNER_TEMP/tokens.json"
+
+          # The token file goes in as a Podman secret mounted where the pod
+          # mounts it. Unlike a bind mount, a secret's contents are sent from
+          # the client, so this also works when podman is remote (under act).
+          "$podman" secret rm "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" secret create "$SMOKE" "$RUNNER_TEMP/tokens.json" >/dev/null
 
           # CONTROLLER_URL points at a closed port, so authenticated calls
           # prove the broker got as far as signing and forwarding (502).
-          docker run -d --name broker -p 8082:8082 \
+          "$podman" rm -f "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" run -d --name "$SMOKE" -p 8082:8082 \
             --read-only --user 65534:65534 --cap-drop ALL \
             --security-opt no-new-privileges \
+            --secret "$SMOKE,type=mount,target=/etc/broker/tokens.json,mode=0444" \
             -e HMAC_SECRET="$(openssl rand -hex 32)" \
             -e ROUTE_PREFIX=/webcam \
             -e CONTROLLER_URL=http://127.0.0.1:9 \
-            -v "$tokens_dir:/etc/broker:ro" \
-            fishcam-broker:smoke
+            "$SMOKE:native"
 
           for _ in $(seq 1 30); do
             curl -fsS http://localhost:8082/healthz >/dev/null 2>&1 && break
@@ -168,14 +182,26 @@ jobs:
           check 404 "unprefixed path is not served"    -X POST -H "$auth" "$base/mute"
           check 502 "valid token reaches the upstream" -H "$auth" "$base/webcam/status"
 
-          docker logs broker 2>&1 | grep -q "loaded 1 user token" \
+          # Capture first: piping straight into `grep -q` under pipefail can
+          # fail when grep exits early and podman logs gets SIGPIPE.
+          logs=$("$podman" logs "$SMOKE" 2>&1 || true)
+          grep -q "loaded 1 user token" <<<"$logs" \
             || { echo "::error::token file was not loaded"; fail=1; }
 
           exit $fail
 
       - name: Broker logs
         if: always()
-        run: docker logs broker 2>&1 || true
+        run: '"${PODMAN:-podman}" logs "$SMOKE" 2>&1 || true'
+
+      - name: Clean up
+        if: always()
+        run: |
+          podman=${PODMAN:-podman}
+          "$podman" rm -f "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" secret rm "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" rmi -f "$SMOKE:native" >/dev/null 2>&1 || true
+          "$podman" manifest rm "$SMOKE:multi" >/dev/null 2>&1 || true
 
   manifests:
     name: k8s · manifest schema validation
@@ -290,8 +316,15 @@ jobs:
           fi
           go test "${flags[@]}" ./...
 
-      - if: steps.src.outputs.present == 'true'
-        uses: docker/setup-buildx-action@v4
+      - name: Use the host's Podman (act)
+        if: ${{ steps.src.outputs.present == 'true' && env.ACT }}
+        run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
+
+      # The streamer's runtime stage is built from Alpine's own root
+      # filesystem tarball rather than a registry image.
+      - name: Fetch Alpine's root filesystem (streamer)
+        if: ${{ steps.src.outputs.present == 'true' && matrix.component == 'streamer' }}
+        run: streamer/fetch-rootfs.sh
 
       # Native platform only (amd64 on GitHub, arm64 under act on Apple
       # Silicon), so the streamer's `apk` install and its ffmpeg capability
@@ -299,9 +332,7 @@ jobs:
       # build already covers cross-building.
       - name: Build image (native platform, not pushed)
         if: steps.src.outputs.present == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.component }}
-          push: false
-          cache-from: ${{ !env.ACT && format('type=gha,scope={0}', matrix.component) || '' }}
-          cache-to: ${{ !env.ACT && format('type=gha,mode=max,scope={0}', matrix.component) || '' }}
+        run: |
+          tag="fishcam-${{ matrix.component }}-smoke-${{ github.run_id }}:native"
+          "${PODMAN:-podman}" build --tag "$tag" ${{ matrix.component }}
+          "${PODMAN:-podman}" rmi -f "$tag" >/dev/null 2>&1 || true

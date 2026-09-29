@@ -191,7 +191,7 @@ The ALSA card needs no entry at all — discovery handles it.
 Two things to check before deploying to a second host. If it runs 32-bit
 Raspberry Pi OS, add `linux/arm/v7` to `PLATFORMS`, since arm64 images will
 not run. And confirm the Alpine ffmpeg build there has `h264_v4l2m2m`; the
-Dockerfile asserts libx264 but not the hardware encoder, as that one is
+Containerfile asserts libx264 but not the hardware encoder, as that one is
 host-specific.
 
 **Controller**:
@@ -219,142 +219,104 @@ host-specific.
 Building
 --
 
-Images are built for **arm64** — the Pi 5 cluster is the only place this
-service runs — and pushed to Docker Hub under `drwhitt/`. Adding **amd64**
-(x86 workstations, CI, kind/minikube) is one variable away, and produces a
-multi-arch manifest covering both. The same build machinery now also
-produces `drwhitt/fishcam-broker`, built the same way as the Controller (see
-"Image size" below) — a Go binary with no runtime-stage `RUN`, so it
-cross-builds without emulation.
-
-The architecture of the build host does not matter. The Go build stage runs
-natively (`FROM --platform=$BUILDPLATFORM`) and cross-compiles to
-`$TARGETARCH`, so an x86 laptop produces arm64 images at native speed — no
-QEMU emulation of the compiler.
+Images are built with **podman** and published to **GitHub Container
+Registry** as `ghcr.io/danny-berg-whitt/fishcam-{streamer,controller,broker}`.
+Nothing in the build uses Docker's tools, registries or base images. The
+build files are named `Containerfile`, podman's native name.
 
 ```sh
-make login                                     # once per machine
-make build                                     # arm64 -> drwhitt/fishcam-*:latest
-make build PLATFORMS=linux/arm64,linux/amd64   # both, via emulation
+make login     # once per machine: podman login ghcr.io
+make release   # build all three images for linux/arm64, then push them
 ```
 
-`make help` lists every target and the current variable values.
+`make help` lists every target and the current settings. `make login` uses
+a personal access token (classic) with the `write:packages` scope, read from
+`GHCR_TOKEN` if set and prompted for otherwise. `TAG=...` overrides
+`latest`, e.g. `make release TAG=$(git rev-parse --short HEAD)`; update
+`k8s/deployment.yaml` to match if you pin versions.
 
-The container engine is auto-detected — `docker` (via buildx) or `podman`
-(via `build --manifest` + `manifest push`) — and `make` fails with an
-explanation if neither is installed or usable. Force a specific one with
-`make build ENGINE=podman`.
-
-With docker, multi-platform builds need buildx's `docker-container` driver,
-since the default driver only emits single-arch images; `make` creates that
-builder (named `fishcam`) on first use and reuses it afterwards.
-
-**Image size.** The streamer runs on Alpine rather than debian-slim, for one
-reason: Debian's `ffmpeg` package depends on its entire optional feature
-surface — LLVM and Mesa for OpenCL, `flite` for speech *synthesis*,
-`pocketsphinx` for speech *recognition*, SDL2, X11, Wayland, JACK — about
-200 packages and ~424 MB, none of which a headless V4L2 → x264 → RTMP
-pipeline touches. Alpine splits ffmpeg into per-library packages and builds
-far less maximally. The Broker, like the Controller, is `FROM scratch` and
-never touches ffmpeg at all, so this doesn't apply to it — it's a single
-static binary either way.
-
-Because Alpine's ffmpeg build options aren't guaranteed across releases, the
-Dockerfile asserts what the pipeline needs — the libx264 and aac encoders,
-the v4l2 and alsa input devices, the flv muxer, and `amixer` — and fails the
-build if any is missing. A codec that quietly vanished would otherwise show
-up as a dead stream rather than a broken build.
-
-**Emulation.** The Go build stage is never emulated — it runs natively and
-cross-compiles. But the streamer's *runtime* stage installs ffmpeg with
-`apk`, which executes inside a target-architecture container, so building
-arm64 on an x86 host (or the reverse) needs QEMU binfmt handlers:
-
-```sh
-make binfmt   # docker: registers them; podman: checks and tells you the package
-```
-
-Docker Desktop and `podman machine` already include these. On a Linux host
-with podman, install `qemu-user-static`. The Controller and Broker images
-are both `FROM scratch` with no `RUN` in their runtime stage, so both
-cross-build without emulation either way — and building on the Pi itself
-sidesteps the question entirely.
-
-This is why the default is arm64 alone: on an Apple Silicon Mac that pass is
-native and quick, while adding amd64 puts the streamer's `apk` install
-through QEMU.
-
-**Other registries.** `REGISTRY` and `TLS_VERIFY` cover the alternatives. To
-use the MicroK8s built-in registry instead (faster iteration, nothing leaves
-the LAN — enable it with `microk8s enable registry`):
-
-```sh
-make build REGISTRY=fishcam.local:32000 TLS_VERIFY=false PLATFORMS=linux/arm64
-```
-
-It serves plain HTTP, hence `TLS_VERIFY=false` — podman does not trust
-unencrypted registries implicitly the way docker trusts `localhost`. The
-image references in `k8s/deployment.yaml` would then need to change to
-`localhost:32000/...`, which is how the kubelet on the Pi reaches it.
-
-For a quick local smoke test without pushing anything:
-
-```sh
-make compile       # cross-compile all three binaries for amd64 and arm64, no engine needed
-make build-native  # single image set for this host, tagged :dev, not pushed
-```
-
-Or by hand. For a single architecture, plain build and push — this is what
-`make build` runs by default, and it reports upload progress per blob:
+By hand, for one image, this is what `make release` runs for each:
 
 ```sh
 podman build --platform linux/arm64 \
-  --tag docker.io/drwhitt/fishcam-streamer:latest ./streamer
-podman push docker.io/drwhitt/fishcam-streamer:latest
+  --tag ghcr.io/danny-berg-whitt/fishcam-broker:latest ./broker
+podman push ghcr.io/danny-berg-whitt/fishcam-broker:latest
 ```
 
-Only a genuine multi-arch build needs a manifest list, which podman builds
-and pushes in two steps:
+**Base images.** The Go build stage of every image is Chainguard's Go image
+(`cgr.dev/chainguard/go`), not Docker Hub's `golang`. It never ships; it only
+compiles. Chainguard publishes just the `latest` tag for free, so the Go
+version floats; `go.mod`'s `go` line is the minimum it must satisfy. The
+controller and broker then run `FROM scratch`: one static binary, nothing
+pulled.
+
+The streamer needs ffmpeg and ALSA's `amixer` at runtime, so it runs on
+Alpine, built from Alpine's own **mini root filesystem tarball** rather than
+an `alpine` image. `streamer/fetch-rootfs.sh` downloads it from Alpine's
+mirror and checks it against the SHA-256 Alpine publishes; `make build` runs
+it for you, and the tarball lands in `streamer/rootfs/` (git-ignored). Set
+`ALPINE_BRANCH=v3.24` (for example) to pin a release instead of
+`latest-stable`. Wolfi, Chainguard's distribution, was considered for this
+stage and rejected: it has no `alsa-utils`, so no `amixer`, and its ffmpeg
+is built without ALSA support.
+
+**Image size.** The streamer runs on Alpine rather than Debian for size:
+Debian's `ffmpeg` package depends on its entire optional feature surface —
+LLVM and Mesa for OpenCL, `flite` for speech *synthesis*, `pocketsphinx` for
+speech *recognition*, SDL2, X11, Wayland, JACK — about 200 packages and
+~424 MB, none of which a headless V4L2 → x264 → RTMP pipeline touches.
+Alpine splits ffmpeg into per-library packages and builds far less
+maximally.
+
+Because Alpine's ffmpeg build options aren't guaranteed across releases, the
+streamer's Containerfile asserts what the pipeline needs — the libx264 and
+aac encoders, the v4l2 and alsa input devices, the flv muxer, and `amixer` —
+and fails the build if any is missing. A codec that quietly vanished would
+otherwise show up as a dead stream rather than a broken build.
+
+**Architectures.** The Go stages run natively and cross-compile, so the
+controller and broker build for any architecture on any host without
+emulation. The streamer's runtime stage runs `apk add` for the target
+architecture, so build it natively: on an Apple Silicon Mac (podman machine
+is arm64) or on the Pi itself, `make build`'s default `linux/arm64` is
+native. Building it for another architecture needs emulation in the podman
+machine.
+
+**Package visibility.** New GHCR packages are private. Either make each one
+public (the package's settings page on GitHub), or give the cluster read
+access: `GHCR_TOKEN=<token with read:packages> make ghcr-pull-secret`
+creates the `ghcr-pull` secret that `k8s/deployment.yaml` already
+references. The images carry an `org.opencontainers.image.source` label,
+which links each package to this repository on GitHub.
+
+**Other registries.** `REGISTRY` points the build elsewhere. To use the
+MicroK8s built-in registry instead (faster iteration, nothing leaves the LAN —
+enable it with `microk8s enable registry`), build and push with podman, which
+needs `--tls-verify=false` for that plain-HTTP registry:
 
 ```sh
-podman build --platform linux/arm64,linux/amd64 \
-  --manifest docker.io/drwhitt/fishcam-streamer:latest ./streamer
-podman manifest push --all docker.io/drwhitt/fishcam-streamer:latest \
-  docker://docker.io/drwhitt/fishcam-streamer:latest
+make build REGISTRY=fishcam.local:32000
+for c in streamer controller broker; do
+  podman push --tls-verify=false fishcam.local:32000/fishcam-$c:latest
+done
 ```
 
-`make build` picks between the two automatically based on whether
-`PLATFORMS` names more than one target.
-
-With docker, buildx does both at once:
-
-```sh
-docker buildx build --platform linux/arm64,linux/amd64 \
-  --tag docker.io/drwhitt/fishcam-streamer:latest --push ./streamer
-```
+The image references in `k8s/deployment.yaml` would then need to change to
+`localhost:32000/...`, which is how the kubelet on the Pi reaches it.
 
 Because the tag is mutable (`:latest`), the deployment sets
-`imagePullPolicy: Always` so a rollout picks up a freshly pushed image. Use
-`make build TAG=$(git rev-parse --short HEAD)` if you would rather pin
-versions, and update the manifest to match.
+`imagePullPolicy: Always` so a rollout picks up a freshly pushed image.
 
 Starting over
 --
 
 ```sh
-make clean       # this project's Go test cache + locally built images
-make rebuild     # clean, then rebuild every layer with --no-cache
-make distclean   # also Go's global build cache and dangling engine layers
+make clean   # remove the locally built images and the fetched Alpine rootfs
 ```
 
-`clean` is deliberately project-scoped: it removes the images built from
-these Dockerfiles (streamer, controller, and broker) and the cached `go
-test` results, and leaves everything else on the machine alone. `distclean`
-reaches into caches shared with your other work — it frees real disk space
-but makes the next build of *any* project slower.
-
-Neither touches images already pushed to a registry. Delete those through
-Docker Hub's web UI.
+That leaves podman's layer cache alone; `podman image prune` and
+`podman builder prune` clear more. Neither touches images already pushed to
+GHCR; delete those from the package's settings page on GitHub.
 
 Deploying
 --
@@ -492,13 +454,17 @@ doesn't):
 - The Android build is skipped: act's image has no Android SDK, and
   Google's Linux Android build tools are x86-64 only.
 - `go test` runs without `-race`, since act's image has no C compiler.
-- Docker builds use no `type=gha` cache, which needs GitHub's cache service.
+- act's job image has no podman, so the image jobs run podman through
+  `ci/podman-act.sh`. It downloads Podman's static remote client, at the
+  version your Podman service reports, and drives the host's Podman over
+  the socket act mounts. Images built and containers started there land in
+  your podman machine; the jobs name them per run and remove them after.
 
-The image-building jobs drive podman through `docker buildx`, which is the
-least reliable part of this setup. If they fail, run the rest by job:
+To run jobs selectively:
 
 ```sh
-act -j broker -j manifests -j go-component -j e2e   # server
+act -j broker-image -j go-component                 # server image builds
+act -j broker -j manifests -j e2e                   # server, no images
 act -j analyze-and-test -j build                    # client
 ```
 
