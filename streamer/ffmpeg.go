@@ -69,9 +69,6 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	log.Printf("DEBUG: s.cfg.FFmpegPath=%s, s.cfg.FFmpegArgs()=%s",
-		s.cfg.FFmpegPath, s.cfg.FFmpegArgs())
-
 	s.mu.Lock()
 	if err := cmd.Start(); err != nil {
 		s.mu.Unlock()

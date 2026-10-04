@@ -15,18 +15,45 @@
 set -euo pipefail
 
 socket=${PODMAN_ACT_SOCKET:-/var/run/docker.sock}
-if [ ! -S "$socket" ]; then
-  echo "podman-act: no socket at $socket; run act with --container-daemon-socket" >&2
-  exit 1
+
+# act bind-mounts the path given to --container-daemon-socket (a path inside
+# the podman machine VM) at /var/run/docker.sock in the job container. Each
+# way that can go wrong gets its own message, since they need different fixes.
+fail() { printf 'podman-act: %s\n' "$@" >&2; exit 1; }
+selinux_hint="On a podman machine (Fedora CoreOS, SELinux enforcing) the job
+  container needs SELinux labelling off to use a bind-mounted socket. Add:
+    --container-options \"--security-opt label=disable\""
+
+if ! kind=$(stat -c %F "$socket" 2>&1); then
+  case "$kind" in
+    *"ermission denied"*)
+      fail "$socket is mounted but access is denied ($kind)." "$selinux_hint" ;;
+    *)
+      fail "nothing at $socket, so act mounted no socket." \
+           "Run act with --container-daemon-socket <socket path inside the podman VM>;" \
+           "podman system connection list shows it at the end of each URI." ;;
+  esac
 fi
+case "$kind" in
+  socket) ;;
+  directory)
+    fail "$socket is a directory, not a socket: the path given to" \
+         "--container-daemon-socket doesn't exist inside the podman VM, so an empty" \
+         "directory was mounted in its place. Check it with:" \
+         "  podman machine ssh ls -l <that path>" ;;
+  *) fail "$socket is a $kind, not a socket." ;;
+esac
 
 # The compat /version endpoint lists a "Podman Engine" component on Podman.
-version=$(curl -fsS --unix-socket "$socket" http://d/version |
-  jq -r '(.Components // [])[] | select(.Name == "Podman Engine") | .Version' | head -1)
-if [ -z "$version" ]; then
-  echo "podman-act: the service on $socket isn't Podman" >&2
-  exit 1
+if ! reply=$(curl -fsS --unix-socket "$socket" http://d/version 2>&1); then
+  case "$reply" in
+    *"ermission denied"*) fail "can't connect to $socket ($reply)." "$selinux_hint" ;;
+    *) fail "can't talk to the service on $socket: $reply" \
+            "Is the Podman service running? (podman machine start)" ;;
+  esac
 fi
+version=$(jq -r '(.Components // [])[] | select(.Name == "Podman Engine") | .Version' <<<"$reply" | head -1)
+[ -n "$version" ] || fail "the service on $socket isn't Podman."
 
 case "$(uname -m)" in
   x86_64 | amd64) arch=amd64 ;;

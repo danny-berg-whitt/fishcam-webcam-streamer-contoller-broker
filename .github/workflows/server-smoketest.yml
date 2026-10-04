@@ -12,16 +12,10 @@ name: server smoketest
 # does.
 
 on:
+  # Every branch, so feature branches get CI before a PR. No pull_request
+  # trigger: for branches in this repo it would run everything a second
+  # time, and a PR shows the push runs for its head commit anyway.
   push:
-    branches: [dev]
-    paths:
-      - "broker/**"
-      - "streamer/**"
-      - "controller/**"
-      - "k8s/**"
-      - "ci/**"
-      - ".github/workflows/server-smoketest.yml"
-  pull_request:
     paths:
       - "broker/**"
       - "streamer/**"
@@ -243,7 +237,7 @@ jobs:
           "$py" ci/check_manifest_refs.py
 
   e2e:
-    name: e2e · broker → controller → stub streamer
+    name: e2e · broker → controller → streamer
     needs: [broker, go-component]
     runs-on: ubuntu-latest
     steps:
@@ -254,43 +248,36 @@ jobs:
           go-version-file: controller/go.mod
           cache: false
 
-      - name: Build controller and broker
+      - name: Build all three
         run: |
-          go build -C controller -o "$RUNNER_TEMP/controller" .
-          go build -C broker     -o "$RUNNER_TEMP/broker" .
+          for c in controller broker streamer; do
+            go build -C "$c" -o "$RUNNER_TEMP/$c" .
+          done
 
+      # The real binaries end to end; only the ffmpeg and amixer that the
+      # streamer drives are stand-ins, which record what they're asked to do.
       - name: Run the request chain
-        run: ci/e2e-smoke.sh "$RUNNER_TEMP/controller" "$RUNNER_TEMP/broker"
+        run: ci/e2e-smoke.sh "$RUNNER_TEMP/controller" "$RUNNER_TEMP/broker" "$RUNNER_TEMP/streamer"
 
   go-component:
-    name: ${{ matrix.component }} · vet, test, image build
+    name: ${{ matrix.component }} · fmt, vet, test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         component: [streamer, controller]
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Is the source in this repo?
-        id: src
-        run: |
-          if [ -f "${{ matrix.component }}/go.mod" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=${{ matrix.component }} not tested::${{ matrix.component }}/go.mod is not in this repository, so its checks were skipped."
-          fi
-
-      - if: steps.src.outputs.present == 'true'
-        uses: actions/setup-go@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.component }}/go.mod
           cache-dependency-path: ${{ matrix.component }}/go.*
 
       - name: gofmt
-        if: steps.src.outputs.present == 'true'
-        working-directory: ${{ matrix.component }}
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -300,13 +287,9 @@ jobs:
           fi
 
       - name: go vet
-        if: steps.src.outputs.present == 'true'
-        working-directory: ${{ matrix.component }}
         run: go vet ./...
 
       - name: go test
-        if: steps.src.outputs.present == 'true'
-        working-directory: ${{ matrix.component }}
         run: |
           flags=(-count=1)
           if command -v gcc >/dev/null; then
@@ -316,23 +299,43 @@ jobs:
           fi
           go test "${flags[@]}" ./...
 
+  pod:
+    name: pod · all three images, wired like the Kubernetes pod
+    needs: [broker-image, go-component]
+    runs-on: ubuntu-latest
+    env:
+      # Unique per run, since under act these land on your shared Podman host.
+      POD: fishcam-pod-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+
       - name: Use the host's Podman (act)
-        if: ${{ steps.src.outputs.present == 'true' && env.ACT }}
+        if: ${{ env.ACT }}
         run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
 
       # The streamer's runtime stage is built from Alpine's own root
       # filesystem tarball rather than a registry image.
-      - name: Fetch Alpine's root filesystem (streamer)
-        if: ${{ steps.src.outputs.present == 'true' && matrix.component == 'streamer' }}
+      - name: Fetch Alpine's root filesystem
         run: streamer/fetch-rootfs.sh
 
       # Native platform only (amd64 on GitHub, arm64 under act on Apple
       # Silicon), so the streamer's `apk` install and its ffmpeg capability
       # assertions never run under emulation. The broker job's multi-arch
       # build already covers cross-building.
-      - name: Build image (native platform, not pushed)
-        if: steps.src.outputs.present == 'true'
+      - name: Build all three images (native platform, not pushed)
         run: |
-          tag="fishcam-${{ matrix.component }}-smoke-${{ github.run_id }}:native"
-          "${PODMAN:-podman}" build --tag "$tag" ${{ matrix.component }}
-          "${PODMAN:-podman}" rmi -f "$tag" >/dev/null 2>&1 || true
+          for c in streamer controller broker; do
+            "${PODMAN:-podman}" build --tag "$POD-$c:native" "$c"
+          done
+
+      - name: Run them as a pod and exercise the API
+        run: |
+          ci/pod-smoke.sh "$POD" \
+            "$POD-streamer:native" "$POD-controller:native" "$POD-broker:native"
+
+      - name: Clean up
+        if: always()
+        run: |
+          for c in streamer controller broker; do
+            "${PODMAN:-podman}" rmi -f "$POD-$c:native" >/dev/null 2>&1 || true
+          done

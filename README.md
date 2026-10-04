@@ -413,13 +413,47 @@ token.
 Testing
 --
 
-Unit tests cover config parsing, ffmpeg argument construction, the HMAC
-scheme (skew, replay, cross-path reuse, forged-nonce protection), the
-Controller's proxy behaviour, and the Broker's token lookup and signing:
+Three levels, each runnable locally and run by the server CI workflow:
 
 ```sh
-make test
+make test        # unit tests for all three components
+make e2e         # the three real binaries, end to end
+make pod-smoke   # the three images (from make build), as a pod
 ```
+
+**Unit tests** cover, per component:
+
+- *Streamer*: config parsing and device discovery; ffmpeg argument
+  construction; the supervisor (restart delays that double up to the
+  maximum, reset after a stable run, SIGINT on shutdown, a missing ffmpeg
+  retried); the internal API (mute and unmute drive `amixer` with the right
+  card and control, a failed mixer call is a 500 that never reports a mute
+  that didn't happen, `/healthz` follows ffmpeg).
+- *Controller*: the HMAC scheme (skew, replay, cross-path reuse,
+  forged-nonce protection); forwarding to the streamer with the method each
+  endpoint requires; streamer failures as 502; the nonce sweeper; client IPs
+  from `X-Forwarded-For`.
+- *Broker*: token lookup, signing against a known vector, method checks,
+  and forwarding through an independently written fake controller.
+
+**End to end** (`ci/e2e-smoke.sh`) runs the real broker, controller and
+streamer together. Only the `ffmpeg` and `amixer` the streamer drives are
+stand-ins, and they record what they're asked to do, so a mute is checked at
+the mixer rather than just in a response. It also kills ffmpeg and checks the
+restart shows up in `/status` through the broker.
+
+**Pod smoke test** (`ci/pod-smoke.sh`) runs the three images as a podman
+pod wired like the Kubernetes pod: shared localhost, only the broker's port
+published, the controller and broker read-only as uid 65534 with no
+capabilities, secrets for `HMAC_SECRET` and the tokens file, and the
+streamer's environment read from `k8s/configmap.yaml`. With no webcam, the
+image's real ffmpeg and amixer run and fail, which proves both are in the
+image and that the failures surface correctly through the API. It only runs
+local images (`--pull=never`), never the published ones.
+
+`ci/check_manifest_refs.py` also checks the manifests for mistakes a schema
+check can't see: ConfigMap keys a container needs but the ConfigMap lacks,
+and a streamer liveness window that doesn't outlast `RESTART_MAX_BACKOFF`.
 
 ### Running CI locally with act
 
@@ -434,8 +468,84 @@ podman rmi -f ghcr.io/catthehacker/ubuntu:act-latest
 podman volume rm act-toolcache
 
 act --container-architecture linux/arm64 \
-    --container-daemon-socket <socket path inside the podman VM>
+    --container-daemon-socket <socket path inside the podman VM> \
+    --container-options "--security-opt label=disable"
 ```
+
+act bind-mounts that socket at `/var/run/docker.sock` in each job
+container, which is where the image jobs look for it. The podman machine
+runs Fedora CoreOS with SELinux enforcing, and a bind-mounted socket
+isn't usable from a labelled container, hence `label=disable`.
+
+To avoid retyping the flags, put them in an `.actrc` at the repository root
+(git-ignored, since the socket path is specific to your machine):
+
+```
+--container-architecture linux/arm64
+--container-daemon-socket /run/user/501/podman/podman.sock
+--container-options --security-opt label=disable
+--platform ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-latest
+--bind
+--pull=false
+```
+
+Keep the `--platform` line: without it act runs `ubuntu-latest` jobs in
+`node:16-buster-slim` from Docker Hub, which lacks the tools these jobs
+use. `--bind` mounts the working tree instead of copying it into each job,
+which is faster; jobs then write only git-ignored files
+(`streamer/rootfs/`, Flutter's build output) into it.
+
+Don't add `--reuse`. It keeps job containers between runs, and act reuses
+an existing container by name without recreating it, so a container made
+with the wrong architecture, socket or options keeps being used whatever
+the flags now say.
+
+act splits each line at its first space into flag and value, and doesn't
+strip quotes, so the `--container-options` value must not be quoted here
+(unlike on the command line). act also reads `~/.actrc` first, and later
+files and the command line override it, so a stale
+`--container-architecture` there is overridden by this file.
+
+`--pull=false` matters. By default every job re-pulls the runner image
+when it starts, and parallel jobs pull it at once. If the image's tag
+changes architecture mid-run, jobs end up in containers of different
+architectures. Pull it once instead:
+
+```sh
+podman pull --platform linux/arm64 ghcr.io/catthehacker/ubuntu:act-latest
+```
+
+**Recognising a mixed-architecture run.** Either symptom means a job's
+container doesn't match the image act reads settings from. One is a Go
+toolchain that crashes with `SIGSEGV` in `go env` after
+`actions/setup-go` reports `linux/amd64`. That's an x86 Go run under
+emulation. The other is `node` not found in a later step, often
+`Post actions/setup-go`, after a step added to `PATH`. Remove the image
+(`podman rmi -f ghcr.io/catthehacker/ubuntu:act-latest`), pull it once as
+above, remove any job containers kept by `--reuse`
+(`podman ps -aq --filter name=^act- | xargs -r podman rm -f`), and run
+with the `.actrc`.
+
+**Memory.** act runs jobs in parallel inside the podman machine VM, which
+gets 2 GiB by default. The web build's `dart2js` and the image builds
+together can exceed that; the kernel then kills a process, which shows as
+`exit code -9` (for example `Target dart2js failed ... exit code -9`). To
+confirm, look for the kill in the VM's kernel log:
+
+```sh
+podman machine ssh 'journalctl -k --no-pager | grep -iE "out of memory|oom-kill"'
+```
+
+The fix is to give the VM more memory (it must be stopped to change it):
+
+```sh
+podman machine stop
+podman machine set --memory 8192   # MiB
+podman machine start
+```
+
+Alternatively, run fewer jobs at once with `--concurrent-jobs 2` in the
+`.actrc`.
 
 `--container-architecture` must be `os/arch`. act splits the value on `/`,
 so a bare `arm64` never selects arm64: the image comes from whatever
@@ -469,8 +579,8 @@ doesn't):
 To run jobs selectively:
 
 ```sh
-act -j broker-image -j go-component                 # server image builds
-act -j broker -j manifests -j e2e                   # server, no images
+act -j broker-image -j pod                          # server image builds
+act -j broker -j go-component -j manifests -j e2e   # server, no images
 act -j analyze-and-test -j build                    # client
 ```
 
@@ -499,6 +609,19 @@ containers pick it up.
 `pathType: Exact` keeps `/healthz` off the public internet; it stays at the
 root for the kubelet, which probes the pod directly.
 
+**Health probes.** Each container's `/healthz` is probed, differently:
+
+- The broker has readiness and liveness probes. It's the pod's only public
+  entry point, so its readiness decides whether the Service sends traffic.
+- The controller has a liveness probe.
+- The streamer has a startup probe and a liveness probe that only restarts
+  the pod after 60s of continuous failure. Its `/healthz` is 503 whenever
+  ffmpeg isn't running, including the pauses between restarts, so that
+  window must outlast `RESTART_MAX_BACKOFF` (30s); CI fails if it doesn't.
+  It deliberately has no readiness probe, which would make the whole pod
+  unready and cut off the broker exactly when `/status` should be reporting
+  that the stream is down.
+
 Calling it directly (with a user's bearer token):
 
 ```sh
@@ -514,7 +637,7 @@ CONTROLLER=https://fishcam.berg-whitt.com PREFIX=/webcam TOKEN=$USER_TOKEN ./cli
 go run client/webcamctl.go -controller https://fishcam.berg-whitt.com -prefix /webcam -token $USER_TOKEN -action mute
 ```
 
-**Flutter app** (`client/flutter/`): a small Material app that stores the
+**Flutter app** (`client/`): a small Material app that stores the
 user's token in the platform keystore (`flutter_secure_storage`) after
 first entry, so it's only asked for once per device.
 

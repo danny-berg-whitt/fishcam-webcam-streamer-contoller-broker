@@ -180,9 +180,10 @@ func isAuto(v string) bool { return v == "" || v == autoValue }
 // Resolve fills in whatever was left on "auto" by inspecting the host.
 //
 // The ALSA card is the setting that actually differs between machines: the
-// id comes from the webcam's USB product string, so a C922 answers to "C922"
-// and a C270 to "Webcam". Detecting it means the same ConfigMap works on
-// both. An explicit value always wins.
+// id is derived from the webcam's USB product string, not chosen for its
+// role (a C922 Pro Stream, "C922 Pro Stream Webcam", answers to "Webcam",
+// not "C922"). Detecting it means the same ConfigMap works across cameras.
+// An explicit value always wins.
 func (c *Config) Resolve() error {
 	if isAuto(c.AlsaCard) {
 		card, err := DetectCaptureCard(c.ProcAsound, c.CardMatch)
