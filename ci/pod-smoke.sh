@@ -56,24 +56,27 @@ awk '/^data:/ { d = 1; next }
 grep -q '^ROUTE_PREFIX=/webcam$' "$work/config.env" \
   || { echo "pod-smoke: couldn't read k8s/configmap.yaml" >&2; exit 1; }
 
+# Only ever run images built locally: never pull a published image in
+# their place, which would test something other than this checkout.
+run=(run -d --pull=never --pod "$name")
 hardened=(--read-only --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges)
 
 "$podman" pod rm -f "$name" >/dev/null 2>&1 || true
 "$podman" pod create --name "$name" -p 8082:8082 >/dev/null
 
 # Explicit devices skip discovery; faster restarts keep the test short.
-"$podman" run -d --pod "$name" --name "$name-streamer" \
+"$podman" "${run[@]}" --name "$name-streamer" \
   --env-file "$work/config.env" \
   -e ALSA_CARD=Webcam -e MUTE_CONTROL=Mic -e VIDEO_DEVICE=/dev/video0 \
   -e RESTART_INITIAL_BACKOFF=200ms -e RESTART_MAX_BACKOFF=1s \
   "$streamer_img" >/dev/null
 
-"$podman" run -d --pod "$name" --name "$name-controller" "${hardened[@]}" \
+"$podman" "${run[@]}" --name "$name-controller" "${hardened[@]}" \
   --secret "$name-hmac,type=env,target=HMAC_SECRET" \
   -e ROUTE_PREFIX=/webcam -e STREAMER_URL=http://127.0.0.1:8081 \
   "$controller_img" >/dev/null
 
-"$podman" run -d --pod "$name" --name "$name-broker" "${hardened[@]}" \
+"$podman" "${run[@]}" --name "$name-broker" "${hardened[@]}" \
   --secret "$name-hmac,type=env,target=HMAC_SECRET" \
   --secret "$name-tokens,type=mount,target=/etc/broker/tokens.json,mode=0444" \
   -e ROUTE_PREFIX=/webcam -e CONTROLLER_URL=http://127.0.0.1:8080 \

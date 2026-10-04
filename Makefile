@@ -29,7 +29,7 @@ ARCH       := $(lastword $(subst /, ,$(PLATFORM)))
 image       = $(REGISTRY)/fishcam-$(1):$(TAG)
 
 .DEFAULT_GOAL := help
-.PHONY: help login rootfs build push release test clean ghcr-pull-secret \
+.PHONY: help login rootfs build push release test e2e pod-smoke clean ghcr-pull-secret \
         secret label-node deploy status logs ingress
 
 help:
@@ -40,6 +40,8 @@ help:
 	@echo "  push              push all three images to REGISTRY"
 	@echo "  release           build, then push"
 	@echo "  test              go vet and go test for each component"
+	@echo "  e2e               all three binaries end to end (stand-in ffmpeg/amixer)"
+	@echo "  pod-smoke         run the built images as a pod, wired like the cluster's"
 	@echo "  clean             remove locally built images and the fetched rootfs"
 	@echo
 	@echo "  secret            create the webcam-hmac secret (once; never overwrites)"
@@ -94,6 +96,19 @@ test:
 	  echo "==> $$c"; \
 	  (cd $$c && go vet ./... && go test -count=1 ./...); \
 	done
+
+# The real broker, controller and streamer binaries, end to end, with
+# stand-ins only for the ffmpeg and amixer the streamer drives.
+e2e:
+	@set -e; bin=$$(mktemp -d); trap 'rm -rf "$$bin"' EXIT; \
+	for c in controller broker streamer; do go build -C $$c -o "$$bin/$$c" .; done; \
+	ci/e2e-smoke.sh "$$bin/controller" "$$bin/broker" "$$bin/streamer"
+
+# The images from `make build`, run as a podman pod wired like the
+# Kubernetes pod. On an Apple Silicon Mac the default linux/arm64 is native.
+pod-smoke:
+	PODMAN="$(PODMAN)" ci/pod-smoke.sh fishcam-pod-smoke \
+	  $(call image,streamer) $(call image,controller) $(call image,broker)
 
 clean:
 	-@for c in $(COMPONENTS); do $(PODMAN) rmi $(REGISTRY)/fishcam-$$c:$(TAG) 2>/dev/null; done
