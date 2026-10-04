@@ -475,8 +475,56 @@ act --container-architecture linux/arm64 \
 act bind-mounts that socket at `/var/run/docker.sock` in each job
 container, which is where the image jobs look for it. The podman machine
 runs Fedora CoreOS with SELinux enforcing, and a bind-mounted socket
-isn't usable from a labelled container, hence `label=disable`. To avoid
-retyping the flags, put them in an `.actrc` file, one per line.
+isn't usable from a labelled container, hence `label=disable`.
+
+To avoid retyping the flags, put them in an `.actrc` at the repository root
+(git-ignored, since the socket path is specific to your machine):
+
+```
+--container-architecture linux/arm64
+--container-daemon-socket /run/user/501/podman/podman.sock
+--container-options --security-opt label=disable
+--platform ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-latest
+--bind
+--pull=false
+```
+
+Keep the `--platform` line: without it act runs `ubuntu-latest` jobs in
+`node:16-buster-slim` from Docker Hub, which lacks the tools these jobs
+use. `--bind` mounts the working tree instead of copying it into each job,
+which is faster; jobs then write only git-ignored files
+(`streamer/rootfs/`, Flutter's build output) into it.
+
+Don't add `--reuse`. It keeps job containers between runs, and act reuses
+an existing container by name without recreating it, so a container made
+with the wrong architecture, socket or options keeps being used whatever
+the flags now say.
+
+act splits each line at its first space into flag and value, and doesn't
+strip quotes, so the `--container-options` value must not be quoted here
+(unlike on the command line). act also reads `~/.actrc` first, and later
+files and the command line override it, so a stale
+`--container-architecture` there is overridden by this file.
+
+`--pull=false` matters. By default every job re-pulls the runner image
+when it starts, and parallel jobs pull it at once. If the image's tag
+changes architecture mid-run, jobs end up in containers of different
+architectures. Pull it once instead:
+
+```sh
+podman pull --platform linux/arm64 ghcr.io/catthehacker/ubuntu:act-latest
+```
+
+**Recognising a mixed-architecture run.** Either symptom means a job's
+container doesn't match the image act reads settings from. One is a Go
+toolchain that crashes with `SIGSEGV` in `go env` after
+`actions/setup-go` reports `linux/amd64`. That's an x86 Go run under
+emulation. The other is `node` not found in a later step, often
+`Post actions/setup-go`, after a step added to `PATH`. Remove the image
+(`podman rmi -f ghcr.io/catthehacker/ubuntu:act-latest`), pull it once as
+above, remove any job containers kept by `--reuse`
+(`podman ps -aq --filter name=^act- | xargs -r podman rm -f`), and run
+with the `.actrc`.
 
 `--container-architecture` must be `os/arch`. act splits the value on `/`,
 so a bare `arm64` never selects arm64: the image comes from whatever
