@@ -12,11 +12,11 @@ on:
   push:
     branches: [dev]
     paths:
-      - "client/flutter/**"
+      - "client/**"
       - ".github/workflows/client-smoketest.yml"
   pull_request:
     paths:
-      - "client/flutter/**"
+      - "client/**"
       - ".github/workflows/client-smoketest.yml"
   workflow_dispatch:
 
@@ -29,7 +29,7 @@ concurrency:
 
 defaults:
   run:
-    working-directory: client/flutter
+    working-directory: client
 
 jobs:
   analyze-and-test:
