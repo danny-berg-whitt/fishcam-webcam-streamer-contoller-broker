@@ -413,13 +413,47 @@ token.
 Testing
 --
 
-Unit tests cover config parsing, ffmpeg argument construction, the HMAC
-scheme (skew, replay, cross-path reuse, forged-nonce protection), the
-Controller's proxy behaviour, and the Broker's token lookup and signing:
+Three levels, each runnable locally and run by the server CI workflow:
 
 ```sh
-make test
+make test        # unit tests for all three components
+make e2e         # the three real binaries, end to end
+make pod-smoke   # the three images (from make build), as a pod
 ```
+
+**Unit tests** cover, per component:
+
+- *Streamer*: config parsing and device discovery; ffmpeg argument
+  construction; the supervisor (restart delays that double up to the
+  maximum, reset after a stable run, SIGINT on shutdown, a missing ffmpeg
+  retried); the internal API (mute and unmute drive `amixer` with the right
+  card and control, a failed mixer call is a 500 that never reports a mute
+  that didn't happen, `/healthz` follows ffmpeg).
+- *Controller*: the HMAC scheme (skew, replay, cross-path reuse,
+  forged-nonce protection); forwarding to the streamer with the method each
+  endpoint requires; streamer failures as 502; the nonce sweeper; client IPs
+  from `X-Forwarded-For`.
+- *Broker*: token lookup, signing against a known vector, method checks,
+  and forwarding through an independently written fake controller.
+
+**End to end** (`ci/e2e-smoke.sh`) runs the real broker, controller and
+streamer together. Only the `ffmpeg` and `amixer` the streamer drives are
+stand-ins, and they record what they're asked to do, so a mute is checked at
+the mixer rather than just in a response. It also kills ffmpeg and checks the
+restart shows up in `/status` through the broker.
+
+**Pod smoke test** (`ci/pod-smoke.sh`) runs the three images as a podman
+pod wired like the Kubernetes pod: shared localhost, only the broker's port
+published, the controller and broker read-only as uid 65534 with no
+capabilities, secrets for `HMAC_SECRET` and the tokens file, and the
+streamer's environment read from `k8s/configmap.yaml`. With no webcam, the
+image's real ffmpeg and amixer run and fail, which proves both are in the
+image and that the failures surface correctly through the API. It only runs
+local images (`--pull=never`), never the published ones.
+
+`ci/check_manifest_refs.py` also checks the manifests for mistakes a schema
+check can't see: ConfigMap keys a container needs but the ConfigMap lacks,
+and a streamer liveness window that doesn't outlast `RESTART_MAX_BACKOFF`.
 
 ### Running CI locally with act
 
@@ -476,8 +510,8 @@ doesn't):
 To run jobs selectively:
 
 ```sh
-act -j broker-image -j go-component                 # server image builds
-act -j broker -j manifests -j e2e                   # server, no images
+act -j broker-image -j pod                          # server image builds
+act -j broker -j go-component -j manifests -j e2e   # server, no images
 act -j analyze-and-test -j build                    # client
 ```
 
@@ -506,6 +540,19 @@ containers pick it up.
 `pathType: Exact` keeps `/healthz` off the public internet; it stays at the
 root for the kubelet, which probes the pod directly.
 
+**Health probes.** Each container's `/healthz` is probed, differently:
+
+- The broker has readiness and liveness probes. It's the pod's only public
+  entry point, so its readiness decides whether the Service sends traffic.
+- The controller has a liveness probe.
+- The streamer has a startup probe and a liveness probe that only restarts
+  the pod after 60s of continuous failure. Its `/healthz` is 503 whenever
+  ffmpeg isn't running, including the pauses between restarts, so that
+  window must outlast `RESTART_MAX_BACKOFF` (30s); CI fails if it doesn't.
+  It deliberately has no readiness probe, which would make the whole pod
+  unready and cut off the broker exactly when `/status` should be reporting
+  that the stream is down.
+
 Calling it directly (with a user's bearer token):
 
 ```sh
@@ -521,7 +568,7 @@ CONTROLLER=https://fishcam.berg-whitt.com PREFIX=/webcam TOKEN=$USER_TOKEN ./cli
 go run client/webcamctl.go -controller https://fishcam.berg-whitt.com -prefix /webcam -token $USER_TOKEN -action mute
 ```
 
-**Flutter app** (`client/flutter/`): a small Material app that stores the
+**Flutter app** (`client/`): a small Material app that stores the
 user's token in the platform keystore (`flutter_secure_storage`) after
 first entry, so it's only asked for once per device.
 
