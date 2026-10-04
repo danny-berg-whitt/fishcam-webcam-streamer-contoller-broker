@@ -9,12 +9,10 @@ name: client smoketest
 # container. The Android build is skipped under act.
 
 on:
+  # Every branch, so feature branches get CI before a PR. No pull_request
+  # trigger: for branches in this repo it would run everything a second
+  # time, and a PR shows the push runs for its head commit anyway.
   push:
-    branches: [dev]
-    paths:
-      - "client/**"
-      - ".github/workflows/client-smoketest.yml"
-  pull_request:
     paths:
       - "client/**"
       - ".github/workflows/client-smoketest.yml"
@@ -104,7 +102,9 @@ jobs:
 
       - name: flutter build web
         if: matrix.target == 'web'
-        run: '"${FLUTTER:-flutter}" build web --release'
+        # --no-wasm-dry-run skips an extra WebAssembly compatibility compile that
+        # this app doesn't use; it costs time and, under act, scarce memory.
+        run: '"${FLUTTER:-flutter}" build web --release --no-wasm-dry-run'
 
       - name: flutter build apk (debug, unsigned)
         if: ${{ matrix.target == 'android' && !env.ACT }}

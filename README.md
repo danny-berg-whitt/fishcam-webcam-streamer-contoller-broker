@@ -526,6 +526,27 @@ above, remove any job containers kept by `--reuse`
 (`podman ps -aq --filter name=^act- | xargs -r podman rm -f`), and run
 with the `.actrc`.
 
+**Memory.** act runs jobs in parallel inside the podman machine VM, which
+gets 2 GiB by default. The web build's `dart2js` and the image builds
+together can exceed that; the kernel then kills a process, which shows as
+`exit code -9` (for example `Target dart2js failed ... exit code -9`). To
+confirm, look for the kill in the VM's kernel log:
+
+```sh
+podman machine ssh 'journalctl -k --no-pager | grep -iE "out of memory|oom-kill"'
+```
+
+The fix is to give the VM more memory (it must be stopped to change it):
+
+```sh
+podman machine stop
+podman machine set --memory 8192   # MiB
+podman machine start
+```
+
+Alternatively, run fewer jobs at once with `--concurrent-jobs 2` in the
+`.actrc`.
+
 `--container-architecture` must be `os/arch`. act splits the value on `/`,
 so a bare `arm64` never selects arm64: the image comes from whatever
 architecture was already pulled. The socket path is the tail of the URI

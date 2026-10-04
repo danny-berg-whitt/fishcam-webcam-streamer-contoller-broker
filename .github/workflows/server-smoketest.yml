@@ -12,16 +12,10 @@ name: server smoketest
 # does.
 
 on:
+  # Every branch, so feature branches get CI before a PR. No pull_request
+  # trigger: for branches in this repo it would run everything a second
+  # time, and a PR shows the push runs for its head commit anyway.
   push:
-    branches: [dev]
-    paths:
-      - "broker/**"
-      - "streamer/**"
-      - "controller/**"
-      - "k8s/**"
-      - "ci/**"
-      - ".github/workflows/server-smoketest.yml"
-  pull_request:
     paths:
       - "broker/**"
       - "streamer/**"
