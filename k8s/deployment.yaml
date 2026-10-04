@@ -36,6 +36,24 @@ spec:
           volumeMounts:
             - { name: dev-video0, mountPath: /dev/video0 }
             - { name: dev-snd, mountPath: /dev/snd }
+          # The streamer's /healthz is 503 whenever ffmpeg isn't running,
+          # including the pauses between restarts. So:
+          # - Liveness only after 60s of continuous failure (6 x 10s). That
+          #   outlasts RESTART_MAX_BACKOFF (30s in the ConfigMap; keep it
+          #   below 60s), so ordinary restarts never trip it, but a pipeline
+          #   that never comes back gets the pod restarted, which re-opens
+          #   the devices.
+          # - No readiness probe, deliberately: an unready streamer would
+          #   make the whole pod unready and cut off the broker, exactly when
+          #   /status should be reporting that the stream is down.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            periodSeconds: 5
+            failureThreshold: 24   # up to 2 minutes for the first ffmpeg start
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            periodSeconds: 10
+            failureThreshold: 6
 
         - name: controller
           image: ghcr.io/danny-berg-whitt/fishcam-controller:latest
@@ -45,6 +63,12 @@ spec:
           # containerPort for `kubectl port-forward` during troubleshooting.
           ports:
             - containerPort: 8080
+          # Always 200 while the process serves HTTP; liveness only, since
+          # the broker's readiness already gates traffic to the pod.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 20
+            failureThreshold: 3
           env:
             - name: LISTEN_ADDR
               value: ":8080"
@@ -68,6 +92,15 @@ spec:
           imagePullPolicy: Always
           ports:
             - containerPort: 8082
+          # The broker is the pod's only public entry point, so its readiness
+          # decides whether the Service sends traffic here.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            periodSeconds: 20
+            failureThreshold: 3
           env:
             - name: LISTEN_ADDR
               value: ":8082"
