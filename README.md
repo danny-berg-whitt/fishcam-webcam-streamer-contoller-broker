@@ -438,9 +438,15 @@ make broker-list-users            # see who currently has access (no token value
 
 Each command prints the raw token exactly once — the Broker never stores it,
 only `sha256(token)`, so if you lose it before writing it down there's no
-way to recover it; mint a fresh one instead. `broker-add-user` restarts the
-broker container to pick up the change, since the token file is only read at
-startup.
+way to recover it; mint a fresh one instead. A code is printed only after
+it has been stored, so if a command fails, no code was issued. The broker
+reads the token file only at startup, so after `broker-add-user`, restart it
+as the command prints (`kubectl rollout restart deployment/webcam`).
+
+`broker-init` changes nothing if `webcam-broker-tokens` already exists, so
+`make secret && make broker-init && make deploy` is safe to re-run.
+`broker-add-user` replaces the secret in one step: if it fails partway, the
+existing users are untouched.
 
 To revoke someone, edit the secret (`kubectl get secret
 webcam-broker-tokens -o jsonpath='{.data.tokens\.json}' | base64 -d`, remove

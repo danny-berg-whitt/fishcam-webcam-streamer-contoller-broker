@@ -176,9 +176,13 @@ label-node:
 	if [ -n "$$labelled" ]; then \
 	  echo "already labelled: $$labelled"; exit 0; \
 	fi; \
-	nodes=$$($(KUBECTL) get nodes -o name); \
+	nodes=$$($(KUBECTL) get nodes -o name) || exit 1; \
 	count=$$(printf '%s\n' "$$nodes" | grep -c . || true); \
-	if [ "$$count" -eq 1 ]; then \
+	if [ "$$count" -eq 0 ]; then \
+	  echo "$(KUBECTL) lists no nodes (context: $$($(KUBECTL) config current-context 2>/dev/null || echo unknown))."; \
+	  echo "Is it pointed at the cluster with the webcam? Check with: $(KUBECTL) get nodes"; \
+	  exit 1; \
+	elif [ "$$count" -eq 1 ]; then \
 	  $(KUBECTL) label $$nodes "$$label"; \
 	else \
 	  echo "$$count nodes and none labelled; say which has the webcam:"; \
