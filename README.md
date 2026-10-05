@@ -283,12 +283,31 @@ is arm64) or on the Pi itself, `make build`'s default `linux/arm64` is
 native. Building it for another architecture needs emulation in the podman
 machine.
 
-**Package visibility.** New GHCR packages are private. Either make each one
-public (the package's settings page on GitHub), or give the cluster read
-access: `GHCR_TOKEN=<token with read:packages> make ghcr-pull-secret`
-creates the `ghcr-pull` secret that `k8s/deployment.yaml` already
-references. The images carry an `org.opencontainers.image.source` label,
-which links each package to this repository on GitHub.
+**Package visibility.** GHCR makes every new package private, whoever
+pushes it and whatever the repository's visibility. The cluster pulls
+without credentials, so make each of the three packages **public**: on its
+page (`https://github.com/users/<owner>/packages/container/package/<name>`),
+open *Package settings*, then *Danger Zone*, then *Change visibility*. This
+is done once per package, in the web interface: GitHub has no API for it.
+Making a package public **can't be undone**.
+
+Public is also the more secure choice here. The images contain only
+binaries built from this public repository, Alpine's packages, and labels;
+the HMAC key and access tokens exist only as cluster secrets at runtime.
+Keeping them private would instead mean storing a classic token with
+`read:packages` on the cluster, and such a token can read *every* private
+package in your account, not just these three.
+
+`make release` reports which images aren't public yet right after
+pushing, and `make deploy` checks before changing anything, so a private
+image stops the deploy with its settings link instead of leaving the pod in
+`ImagePullBackOff`. `make check-images` runs the same check on its own.
+
+If you'd rather keep them private, `GHCR_TOKEN=<token> make
+ghcr-pull-secret` creates the `ghcr-pull` secret that
+`k8s/deployment.yaml` already references; `make deploy` then skips the
+public-access check. The images carry an `org.opencontainers.image.source`
+label, which links each package to this repository on GitHub.
 
 **Other registries.** `REGISTRY` points the build elsewhere. To use the
 MicroK8s built-in registry instead (faster iteration, nothing leaves the LAN —

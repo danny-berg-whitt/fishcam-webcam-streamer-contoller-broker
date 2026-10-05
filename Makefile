@@ -39,7 +39,7 @@ image       = $(REGISTRY)/fishcam-$(1):$(TAG)
 
 .DEFAULT_GOAL := help
 .PHONY: help login rootfs build push release test e2e pod-smoke clean ghcr-pull-secret \
-        secret label-node deploy deploy-check manifests status logs ingress
+        secret label-node deploy deploy-check manifests status logs ingress check-images
 
 help:
 	@echo "Targets:"
@@ -47,7 +47,8 @@ help:
 	@echo "  rootfs            fetch and verify Alpine's root filesystem for the streamer"
 	@echo "  build             build all three images for PLATFORM"
 	@echo "  push              push all three images to REGISTRY"
-	@echo "  release           build, then push"
+	@echo "  release           build, then push (then reports which images aren't public)"
+	@echo "  check-images      check the cluster can pull each image without credentials"
 	@echo "  test              go vet and go test for each component"
 	@echo "  e2e               all three binaries end to end (stand-in ffmpeg/amixer)"
 	@echo "  pod-smoke         run the built images as a pod, wired like the cluster's"
@@ -106,6 +107,13 @@ push:
 	done
 
 release: build push
+	-@k8s/check-images.sh $(REGISTRY) $(TAG) $(COMPONENTS)
+
+# The cluster pulls anonymously unless the ghcr-pull secret exists, so on
+# GHCR each package must be public. GitHub has no API for that; this reports
+# the settings page for any that isn't.
+check-images:
+	@k8s/check-images.sh $(REGISTRY) $(TAG) $(COMPONENTS)
 
 test:
 	@set -e; for c in $(COMPONENTS); do \
@@ -198,6 +206,11 @@ label-node:
 deploy-check:
 	$(require_registry)
 	@k8s/render.sh k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml >/dev/null
+	@if $(KUBECTL) get secret ghcr-pull >/dev/null 2>&1; then \
+	  echo "ghcr-pull secret present; pulling with its credentials, so not checking public access."; \
+	else \
+	  k8s/check-images.sh $(REGISTRY) $(TAG) $(COMPONENTS); \
+	fi
 
 # Checks the two secrets the pod can't start without, so a missing one fails
 # here with a pointer instead of as CreateContainerConfigError in the pod.
