@@ -1,20 +1,24 @@
 import 'package:flutter/material.dart';
 
 import 'home_screen.dart';
+import 'server_config.dart';
 
 void main() {
-  runApp(const FishCamApp());
+  runApp(FishCamApp(baseUrl: configuredServerUrl()));
 }
 
 class FishCamApp extends StatelessWidget {
-  const FishCamApp({super.key});
+  /// e.g. https://webcam.example.com; '' if unconfigured.
+  final String baseUrl;
+
+  const FishCamApp({super.key, required this.baseUrl});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'FishCam',
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
-      home: const WebcamHomeScreen(),
+      home: WebcamHomeScreen(baseUrl: baseUrl),
     );
   }
 }

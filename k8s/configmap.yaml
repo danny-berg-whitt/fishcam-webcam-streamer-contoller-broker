@@ -1,0 +1,63 @@
+---
+# Environment for the containers; restart the deployment after a change.
+# "auto" device settings are discovered at startup and logged; an explicit
+# value skips discovery.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webcam-config
+  labels:
+    app: webcam
+data:
+  # --- Routing -----------------------------------------------------------
+  # Required by the controller and broker (a non-optional configMapKeyRef).
+  ROUTE_PREFIX: "/webcam"
+
+  # --- Destination -------------------------------------------------------
+  RTMP_URL: "rtmp://hls-service.default.svc.cluster.local/live/stream"
+
+  # --- Capture -----------------------------------------------------------
+  # "auto": the lowest-numbered /dev/video* node, a UVC camera's capture node.
+  VIDEO_DEVICE: "auto"
+  # MJPEG, for webcams without onboard H.264.
+  INPUT_FORMAT: "mjpeg"
+  VIDEO_SIZE: "1280x720"
+  FRAMERATE: "10"
+  # "auto": the USB card with a capture PCM. With two microphones it refuses
+  # to guess; narrow it with ALSA_CARD_MATCH or name it in ALSA_CARD.
+  ALSA_CARD: "auto"
+  ALSA_CARD_MATCH: ""
+  # "auto": plughw:CARD=<ALSA_CARD>,DEV=0.
+  AUDIO_DEVICE: "auto"
+  AUDIO_SAMPLE_RATE: "44100"
+
+  # --- Encode ------------------------------------------------------------
+  # Software encoding (the Pi 5 has no H.264 encoder). For a hardware encoder
+  # such as the Pi 4's h264_v4l2m2m, also set PRESET and TUNE to "".
+  VIDEO_CODEC: "libx264"
+  PRESET: "veryfast"
+  TUNE: "zerolatency"
+  PIXEL_FORMAT: "yuv420p"
+  VIDEO_BITRATE: "2M"
+  BUFSIZE: "4M"
+  AUDIO_BITRATE: "128k"
+  # Keyframe interval in frames. HLS segments are cut only at keyframes, so
+  # this is the floor on latency: 5 at 10 fps suits a 500ms hls_fragment.
+  # Empty means twice the framerate.
+  GOP: "5"
+
+  # --- Mute control ------------------------------------------------------
+  # "auto": the card's only control with a capture switch. To choose one,
+  # `amixer -c <card> scontrols` lists them.
+  MUTE_CONTROL: "auto"
+  START_MUTED: "false"
+
+  # --- Diagnostics -------------------------------------------------------
+  # ffmpeg's -loglevel. "info" logs the opened streams on each start;
+  # "warning" is quieter once the pipeline is known good.
+  FFMPEG_LOGLEVEL: "info"
+
+  # --- Supervisor --------------------------------------------------------
+  RESTART_INITIAL_BACKOFF: "1s"
+  RESTART_MAX_BACKOFF: "30s"
+  RESTART_STABLE_AFTER: "1m"

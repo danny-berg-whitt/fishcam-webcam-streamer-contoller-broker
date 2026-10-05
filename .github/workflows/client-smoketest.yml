@@ -1,0 +1,100 @@
+name: client smoketest
+
+# Analyze, test, and build for web and Android. Under act (env.ACT), Flutter
+# comes from ci/flutter-sdk.sh and the Android build is skipped.
+
+on:
+  # Every branch. No pull_request trigger: it would duplicate the push runs.
+  push:
+    paths:
+      - "client/**"
+      - "deploy.env.example"
+      - ".github/workflows/client-smoketest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: client
+
+jobs:
+  analyze-and-test:
+    name: analyze + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # pubspec.lock needs Flutter >= 3.38.4.
+      - uses: subosito/flutter-action@v2
+        if: ${{ !env.ACT }}
+        with:
+          channel: stable
+          cache: true
+
+      # $GITHUB_ENV, not $GITHUB_PATH, which under act can lose `node`.
+      - name: Use Flutter from a git checkout (act)
+        if: ${{ env.ACT }}
+        run: echo "FLUTTER=$GITHUB_WORKSPACE/ci/flutter-sdk.sh" >> "$GITHUB_ENV"
+
+      - run: '"${FLUTTER:-flutter}" --version'
+
+      - run: '"${FLUTTER:-flutter}" pub get'
+
+      - name: flutter analyze
+        run: '"${FLUTTER:-flutter}" analyze --no-fatal-infos'
+
+      - name: flutter test
+        run: '"${FLUTTER:-flutter}" test --reporter expanded'
+
+  build:
+    name: build · ${{ matrix.target }}
+    needs: analyze-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [web, android]
+    steps:
+      - uses: actions/checkout@v7
+
+      # No arm64 Linux Android build tools exist.
+      - name: Android build skipped (act)
+        if: ${{ matrix.target == 'android' && env.ACT }}
+        run: echo "::notice::Android build skipped under act; it runs on GitHub."
+
+      # android/app/build.gradle.kts targets Java 17.
+      - if: ${{ matrix.target == 'android' && !env.ACT }}
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        if: ${{ !env.ACT }}
+        with:
+          channel: stable
+          cache: true
+
+      - name: Use Flutter from a git checkout (act)
+        if: ${{ env.ACT && matrix.target != 'android' }}
+        run: echo "FLUTTER=$GITHUB_WORKSPACE/ci/flutter-sdk.sh" >> "$GITHUB_ENV"
+
+      - if: ${{ !(matrix.target == 'android' && env.ACT) }}
+        run: '"${FLUTTER:-flutter}" pub get'
+
+      - name: flutter build web
+        if: matrix.target == 'web'
+        # --no-wasm-dry-run skips an unneeded extra compile. Reading
+        # deploy.env.example checks Flutter can still parse it.
+        run: '"${FLUTTER:-flutter}" build web --release --no-wasm-dry-run --dart-define-from-file=../deploy.env.example'
+
+      - name: flutter build apk (debug, unsigned)
+        if: ${{ matrix.target == 'android' && !env.ACT }}
+        run: '"${FLUTTER:-flutter}" build apk --debug'

@@ -1,3 +1,4 @@
+# Template: `make deploy` fills the ${...} placeholders via k8s/render.sh.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,11 +17,16 @@ spec:
       labels:
         app: webcam
     spec:
+      # The node with the webcam; `make label-node` applies the label.
       nodeSelector:
-        fishcam.berg-whitt.com/webcam: "c922"
+        ${WEBCAM_NODE_LABEL_KEY}: "${WEBCAM_NODE_LABEL_VALUE}"
+      # Only needed for private packages (`make ghcr-pull-secret`); if it's
+      # missing, the kubelet warns and pulls anonymously.
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: streamer
-          image: drwhitt/fishcam-streamer:latest
+          image: ${REGISTRY}/fishcam-streamer:${TAG}
           imagePullPolicy: Always
           securityContext:
             privileged: true   # unavoidable for USB device access
@@ -30,15 +36,30 @@ spec:
           volumeMounts:
             - { name: dev-video0, mountPath: /dev/video0 }
             - { name: dev-snd, mountPath: /dev/snd }
+          # /healthz is 503 whenever ffmpeg is down, including between
+          # restarts. The 60s liveness window must outlast RESTART_MAX_BACKOFF
+          # (CI checks this). No readiness probe: an unready streamer would
+          # cut off the broker just when /status should report the outage.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            periodSeconds: 5
+            failureThreshold: 24   # up to 2 minutes for the first ffmpeg start
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            periodSeconds: 10
+            failureThreshold: 6
 
         - name: controller
-          image: drwhitt/fishcam-controller:latest
+          image: ${REGISTRY}/fishcam-controller:${TAG}
           imagePullPolicy: Always
-          # No Service selects this container's port directly anymore — the
-          # broker reaches it over pod loopback only. Left as a distinct
-          # containerPort for `kubectl port-forward` during troubleshooting.
+          # Not exposed by any Service; declared for `kubectl port-forward`.
           ports:
             - containerPort: 8080
+          # Liveness only; the broker's readiness gates traffic.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 20
+            failureThreshold: 3
           env:
             - name: LISTEN_ADDR
               value: ":8080"
@@ -58,10 +79,18 @@ spec:
             seccompProfile: { type: RuntimeDefault }
 
         - name: broker
-          image: drwhitt/fishcam-broker:latest
+          image: ${REGISTRY}/fishcam-broker:${TAG}
           imagePullPolicy: Always
           ports:
             - containerPort: 8082
+          # The pod's only public entry point.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            periodSeconds: 20
+            failureThreshold: 3
           env:
             - name: LISTEN_ADDR
               value: ":8082"

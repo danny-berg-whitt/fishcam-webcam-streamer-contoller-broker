@@ -1,0 +1,36 @@
+# Build stage: runs natively on the build host and cross-compiles, so it
+# never needs emulation. Chainguard's free tier publishes only `latest`, so
+# the Go version floats above go.mod's minimum.
+FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/go:latest AS build
+USER 0
+
+# Set by podman build; the fallbacks below build for the host if empty.
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /app
+
+COPY go.mod ./
+COPY *.go ./
+
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-$(go env GOOS)} \
+    GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -trimpath -ldflags="-s -w" -o /out/controller .
+
+# Runtime stage: the static binary alone. No CA bundle or tzdata, since its
+# only outbound call is plain HTTP over pod loopback (logs are in UTC).
+FROM scratch
+
+# Links the GHCR package to its source repository.
+LABEL org.opencontainers.image.source="https://github.com/danny-berg-whitt/fishcam-webcam-streamer-contoller-broker"
+LABEL org.opencontainers.image.description="FishCam controller: HMAC-authenticated mute/status API in front of the streamer"
+
+COPY --from=build /out/controller /usr/local/bin/controller
+
+# nobody:nogroup, numeric because scratch has no /etc/passwd.
+USER 65534:65534
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/controller"]

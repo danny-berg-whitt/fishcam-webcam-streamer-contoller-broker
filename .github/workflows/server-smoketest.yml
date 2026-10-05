@@ -1,0 +1,318 @@
+name: server smoketest
+
+# Unit tests, image builds, manifests, an end-to-end run of the three
+# binaries, and the three images run as a pod. Also runs under act on arm64
+# (see README); act-specific steps check env.ACT, which GitHub never sets.
+
+on:
+  # Every branch. No pull_request trigger: it would duplicate the push runs.
+  push:
+    paths:
+      - "broker/**"
+      - "streamer/**"
+      - "controller/**"
+      - "k8s/**"
+      - "ci/**"
+      - "deploy.env.example"
+      - "Makefile"
+      - ".github/workflows/server-smoketest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  broker:
+    name: broker · fmt, vet, test, cross-compile
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: broker/go.mod
+          cache: false # the broker has no dependencies, so there is nothing to cache
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race needs a C compiler, which act's image lacks.
+      - name: go test
+        run: |
+          flags=(-count=1 -v)
+          if command -v gcc >/dev/null; then
+            flags=(-race "${flags[@]}")
+          else
+            echo "::warning::No C compiler here, so the race detector is off."
+          fi
+          go test "${flags[@]}" ./...
+
+      - name: Cross-compile for the Pi (linux/arm64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /dev/null .
+
+  broker-image:
+    name: broker · image build and container smoke run
+    needs: broker
+    runs-on: ubuntu-latest
+    env:
+      # Unique per run: under act these share your Podman host.
+      SMOKE: fishcam-broker-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # act's job image has no podman; ci/podman-act.sh drives the host's.
+      - name: Use the host's Podman (act)
+        if: ${{ env.ACT }}
+        run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
+
+      - run: '"${PODMAN:-podman}" version'
+
+      # Builds without emulation (cross-compiled, FROM scratch). The check
+      # guards against podman's layer cache reusing one architecture's
+      # result for the other.
+      - name: Build linux/amd64 + linux/arm64 (not pushed)
+        run: |
+          "${PODMAN:-podman}" manifest rm "$SMOKE:multi" >/dev/null 2>&1 || true
+          "${PODMAN:-podman}" build --platform linux/amd64,linux/arm64 \
+            --manifest "$SMOKE:multi" broker
+          archs=$("${PODMAN:-podman}" manifest inspect "$SMOKE:multi" \
+            | jq -r '[.manifests[].platform.architecture] | sort | join(",")')
+          echo "manifest architectures: $archs"
+          [ "$archs" = "amd64,arm64" ] || { echo "::error::expected amd64,arm64"; exit 1; }
+
+      # Native platform, so it runs without emulation in the next steps.
+      - name: Build a native image for a local run
+        run: '"${PODMAN:-podman}" build --tag "$SMOKE:native" broker'
+
+      - name: Refuses to start without HMAC_SECRET
+        run: |
+          if "${PODMAN:-podman}" run --rm "$SMOKE:native"; then
+            echo "::error::broker started without HMAC_SECRET"
+            exit 1
+          fi
+
+      - name: Run with the pod's securityContext and probe it
+        run: |
+          set -euo pipefail
+          podman=${PODMAN:-podman}
+
+          token=$(openssl rand -hex 32)
+          hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+          printf '{"%s":"ci"}' "$hash" > "$RUNNER_TEMP/tokens.json"
+
+          # A secret, not a bind mount, so it also works with remote podman.
+          "$podman" secret rm "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" secret create "$SMOKE" "$RUNNER_TEMP/tokens.json" >/dev/null
+
+          # A closed CONTROLLER_URL: a 502 proves the broker got as far as
+          # forwarding.
+          "$podman" rm -f "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" run -d --name "$SMOKE" -p 8082:8082 \
+            --read-only --user 65534:65534 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --secret "$SMOKE,type=mount,target=/etc/broker/tokens.json,mode=0444" \
+            -e HMAC_SECRET="$(openssl rand -hex 32)" \
+            -e ROUTE_PREFIX=/webcam \
+            -e CONTROLLER_URL=http://127.0.0.1:9 \
+            "$SMOKE:native"
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:8082/healthz >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+
+          fail=0
+          check() {
+            local want=$1 desc=$2; shift 2
+            local got
+            got=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+            if [ "$got" = "$want" ]; then
+              echo "ok   $want  $desc"
+            else
+              echo "::error::$desc: got HTTP $got, want $want"
+              fail=1
+            fi
+          }
+          base=http://localhost:8082
+          auth="Authorization: Bearer $token"
+
+          check 200 "healthz is unauthenticated"       "$base/healthz"
+          check 404 "healthz is not prefixed"          "$base/webcam/healthz"
+          check 401 "no token"                         -X POST "$base/webcam/mute"
+          check 401 "unknown token"                    -X POST -H "Authorization: Bearer $(openssl rand -hex 32)" "$base/webcam/mute"
+          check 405 "GET cannot mute"                  -H "$auth" "$base/webcam/mute"
+          check 404 "unprefixed path is not served"    -X POST -H "$auth" "$base/mute"
+          check 502 "valid token reaches the upstream" -H "$auth" "$base/webcam/status"
+
+          # Capture first: `podman logs | grep -q` can fail with SIGPIPE.
+          logs=$("$podman" logs "$SMOKE" 2>&1 || true)
+          grep -q "loaded 1 user token" <<<"$logs" \
+            || { echo "::error::token file was not loaded"; fail=1; }
+
+          exit $fail
+
+      - name: Broker logs
+        if: always()
+        run: '"${PODMAN:-podman}" logs "$SMOKE" 2>&1 || true'
+
+      - name: Clean up
+        if: always()
+        run: |
+          podman=${PODMAN:-podman}
+          "$podman" rm -f "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" secret rm "$SMOKE" >/dev/null 2>&1 || true
+          "$podman" rmi -f "$SMOKE:native" >/dev/null 2>&1 || true
+          "$podman" manifest rm "$SMOKE:multi" >/dev/null 2>&1 || true
+
+  manifests:
+    name: k8s · manifest schema validation
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v7
+
+      # Called by full path: under act, changing $GITHUB_PATH can lose
+      # `node` for later steps.
+      - name: Install kubeconform
+        run: |
+          case "$(uname -m)" in
+            x86_64)        arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::no kubeconform build for $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-${arch}.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" kubeconform
+
+      # Validate the manifests as rendered with the example settings.
+      - name: Render with deploy.env.example
+        run: |
+          set -a; . ./deploy.env.example; set +a
+          k8s/render.sh -o "$RUNNER_TEMP/k8s" k8s/*.yaml
+
+      - name: Validate schemas
+        run: '"$RUNNER_TEMP/kubeconform" -strict -summary -output text "$RUNNER_TEMP"/k8s/*.yaml'
+
+      # Catches what a schema check can't (see the script).
+      - name: Cross-check ConfigMap references
+        run: |
+          py=python3
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "$RUNNER_TEMP/venv"
+            "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml
+            py="$RUNNER_TEMP/venv/bin/python"
+          fi
+          "$py" ci/check_manifest_refs.py "$RUNNER_TEMP/k8s"
+
+  e2e:
+    name: e2e · broker → controller → streamer
+    needs: [broker, go-component]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: controller/go.mod
+          cache: false
+
+      - name: Build all three
+        run: |
+          for c in controller broker streamer; do
+            go build -C "$c" -o "$RUNNER_TEMP/$c" .
+          done
+
+      - name: Run the request chain
+        run: ci/e2e-smoke.sh "$RUNNER_TEMP/controller" "$RUNNER_TEMP/broker" "$RUNNER_TEMP/streamer"
+
+  go-component:
+    name: ${{ matrix.component }} · fmt, vet, test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [streamer, controller]
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.component }}/go.mod
+          cache-dependency-path: ${{ matrix.component }}/go.*
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: |
+          flags=(-count=1)
+          if command -v gcc >/dev/null; then
+            flags=(-race "${flags[@]}")
+          else
+            echo "::warning::No C compiler here, so the race detector is off."
+          fi
+          go test "${flags[@]}" ./...
+
+  pod:
+    name: pod · all three images, wired like the Kubernetes pod
+    needs: [broker-image, go-component]
+    runs-on: ubuntu-latest
+    env:
+      # Unique per run: under act these share your Podman host.
+      POD: fishcam-pod-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use the host's Podman (act)
+        if: ${{ env.ACT }}
+        run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
+
+      - name: Fetch Alpine's root filesystem
+        run: streamer/fetch-rootfs.sh
+
+      # Native platform only: the streamer's `apk add` never runs emulated.
+      - name: Build all three images (native platform, not pushed)
+        run: |
+          for c in streamer controller broker; do
+            "${PODMAN:-podman}" build --tag "$POD-$c:native" "$c"
+          done
+
+      - name: Run them as a pod and exercise the API
+        run: |
+          ci/pod-smoke.sh "$POD" \
+            "$POD-streamer:native" "$POD-controller:native" "$POD-broker:native"
+
+      - name: Clean up
+        if: always()
+        run: |
+          for c in streamer controller broker; do
+            "${PODMAN:-podman}" rmi -f "$POD-$c:native" >/dev/null 2>&1 || true
+          done

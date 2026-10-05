@@ -1,0 +1,58 @@
+# Build stage: runs natively on the build host and cross-compiles, so it
+# never needs emulation. Chainguard's free tier publishes only `latest`, so
+# the Go version floats above go.mod's minimum.
+FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/go:latest AS build
+USER 0
+
+# Set by podman build; the fallbacks below build for the host if empty.
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /app
+
+COPY go.mod ./
+COPY *.go ./
+
+# Static, so it runs on Alpine's musl.
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-$(go env GOOS)} \
+    GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -trimpath -ldflags="-s -w" -o /out/streamer .
+
+# Alpine's mini root filesystem, from the verified tarball that
+# streamer/fetch-rootfs.sh <amd64|arm64> downloads (`make build` runs it).
+FROM scratch AS alpine-rootfs
+ARG TARGETARCH
+ADD rootfs/alpine-minirootfs-${TARGETARCH}.tar.gz /
+
+# Runtime stage: Alpine, whose ffmpeg is far smaller than Debian's. It runs
+# `apk add` for the target architecture, so build it natively or under
+# emulation.
+FROM alpine-rootfs
+
+# A rootfs tarball carries no image config, so PATH must be set here.
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Links the GHCR package to its source repository.
+LABEL org.opencontainers.image.source="https://github.com/danny-berg-whitt/fishcam-webcam-streamer-contoller-broker"
+LABEL org.opencontainers.image.description="FishCam streamer: USB webcam to RTMP via ffmpeg, with ALSA mute control"
+
+RUN apk add --no-cache \
+      ffmpeg \
+      alsa-utils \
+      ca-certificates
+
+# Fail the build, not the stream, if Alpine's ffmpeg loses a needed feature.
+RUN set -eux; \
+    ffmpeg -hide_banner -encoders | grep -q 'libx264'; \
+    ffmpeg -hide_banner -encoders | grep -q ' aac '; \
+    ffmpeg -hide_banner -devices  | grep -q 'video4linux2'; \
+    ffmpeg -hide_banner -devices  | grep -q 'alsa'; \
+    ffmpeg -hide_banner -muxers   | grep -q 'flv'; \
+    command -v amixer
+
+COPY --from=build /out/streamer /usr/local/bin/streamer
+
+EXPOSE 8081
+
+ENTRYPOINT ["/usr/local/bin/streamer"]

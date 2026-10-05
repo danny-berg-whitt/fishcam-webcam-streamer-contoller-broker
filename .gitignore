@@ -1,0 +1,6 @@
+# Local act settings; the podman socket path is specific to each machine.
+.actrc
+
+# Per-deployment settings (see deploy.env.example) and rendered manifests.
+deploy.env
+build/

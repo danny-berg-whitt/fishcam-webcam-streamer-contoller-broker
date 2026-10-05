@@ -1,8 +1,7 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// Persists the user's bearer token in the platform keystore (Keychain on
-/// iOS, Keystore-backed EncryptedSharedPreferences on Android) so the
-/// person only has to enter it once per device, not once per launch.
+/// Keeps the access code in the platform keystore, so it's entered once per
+/// device.
 class TokenStorage {
   static const _key = 'fishcam_user_token';
 
