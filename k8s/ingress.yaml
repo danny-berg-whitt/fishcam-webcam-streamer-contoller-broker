@@ -1,10 +1,12 @@
+# A template: ${...} placeholders are filled from deploy.env by k8s/render.sh
+# (which `make ingress` runs). Don't apply this file directly.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: webcam-ingress
 spec:
   rules:
-    - host: fishcam.berg-whitt.com
+    - host: ${WEBCAM_HOST}
       http:
         paths:
           # The broker serves /webcam itself (ROUTE_PREFIX), the same way

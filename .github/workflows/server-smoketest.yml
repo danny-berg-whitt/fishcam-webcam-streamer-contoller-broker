@@ -22,6 +22,8 @@ on:
       - "controller/**"
       - "k8s/**"
       - "ci/**"
+      - "deploy.env.example"
+      - "Makefile"
       - ".github/workflows/server-smoketest.yml"
   workflow_dispatch:
 
@@ -219,8 +221,16 @@ jobs:
           curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-${arch}.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP" kubeconform
 
+      # The manifests are templates; render them with the example settings,
+      # which also proves every placeholder has a value and every value
+      # passes render.sh's checks, then validate what would be applied.
+      - name: Render with deploy.env.example
+        run: |
+          set -a; . ./deploy.env.example; set +a
+          k8s/render.sh -o "$RUNNER_TEMP/k8s" k8s/*.yaml
+
       - name: Validate schemas
-        run: '"$RUNNER_TEMP/kubeconform" -strict -summary -output text k8s/*.yaml'
+        run: '"$RUNNER_TEMP/kubeconform" -strict -summary -output text "$RUNNER_TEMP"/k8s/*.yaml'
 
       # kubeconform can't see that a configMapKeyRef names a key the
       # ConfigMap doesn't define; that only fails at runtime. Uses the
@@ -234,7 +244,7 @@ jobs:
             "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml
             py="$RUNNER_TEMP/venv/bin/python"
           fi
-          "$py" ci/check_manifest_refs.py
+          "$py" ci/check_manifest_refs.py "$RUNNER_TEMP/k8s"
 
   e2e:
     name: e2e · broker → controller → streamer

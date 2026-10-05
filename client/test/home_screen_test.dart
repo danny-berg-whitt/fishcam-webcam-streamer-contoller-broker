@@ -8,11 +8,13 @@ import 'package:flutter_test/flutter_test.dart';
 // reaches the client would go to the test binding's stub HttpClient. The
 // request logic itself is covered with a MockClient in
 // webcam_client_test.dart.
+const _server = 'https://webcam.example';
+
 void main() {
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
   testWidgets('app boots with no stored token', (tester) async {
-    await tester.pumpWidget(const FishCamApp());
+    await tester.pumpWidget(const FishCamApp(baseUrl: _server));
     await tester.pumpAndSettle();
 
     expect(find.text('FishCam'), findsOneWidget);
@@ -34,7 +36,7 @@ void main() {
 
   testWidgets('an action with no token prompts, and cancelling is harmless',
       (tester) async {
-    await tester.pumpWidget(const FishCamApp());
+    await tester.pumpWidget(const FishCamApp(baseUrl: _server));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Mute'));
@@ -49,5 +51,34 @@ void main() {
 
     // Cancelling must not have stored anything.
     expect(await const FlutterSecureStorage().readAll(), isEmpty);
+  });
+
+  testWidgets('a build without a server says so and disables actions',
+      (tester) async {
+    await tester.pumpWidget(const FishCamApp(baseUrl: ''));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('No server configured'), findsOneWidget);
+    for (final label in ['Mute', 'Unmute', 'Refresh status']) {
+      final button = tester.widget<ButtonStyleButton>(
+        find.ancestor(
+          of: find.text(label),
+          matching: find.bySubtype<ButtonStyleButton>(),
+        ),
+      );
+      expect(button.onPressed, isNull, reason: '$label should be disabled');
+    }
+
+    // Nothing can prompt for an access code with nowhere to send it.
+    await tester.tap(find.text('Mute'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(find.text('Enter Access Code'), findsNothing);
+  });
+
+  testWidgets('a configured build shows no configuration warning',
+      (tester) async {
+    await tester.pumpWidget(const FishCamApp(baseUrl: _server));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('No server configured'), findsNothing);
   });
 }

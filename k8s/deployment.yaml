@@ -1,3 +1,5 @@
+# A template: ${...} placeholders are filled from deploy.env by k8s/render.sh
+# (which `make deploy` runs). Don't apply this file directly.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,8 +18,10 @@ spec:
       labels:
         app: webcam
     spec:
+      # Pinned to the node the webcam is plugged into: WEBCAM_NODE_LABEL,
+      # which `make label-node` applies to that node.
       nodeSelector:
-        fishcam.berg-whitt.com/webcam: "c922"
+        ${WEBCAM_NODE_LABEL_KEY}: "${WEBCAM_NODE_LABEL_VALUE}"
       # For pulling from GHCR while the packages are private (the default
       # for new packages); create it with `make ghcr-pull-secret`. Once the
       # packages are public this is unused, and a missing secret only makes
@@ -26,7 +30,7 @@ spec:
         - name: ghcr-pull
       containers:
         - name: streamer
-          image: ghcr.io/danny-berg-whitt/fishcam-streamer:latest
+          image: ${REGISTRY}/fishcam-streamer:${TAG}
           imagePullPolicy: Always
           securityContext:
             privileged: true   # unavoidable for USB device access
@@ -56,7 +60,7 @@ spec:
             failureThreshold: 6
 
         - name: controller
-          image: ghcr.io/danny-berg-whitt/fishcam-controller:latest
+          image: ${REGISTRY}/fishcam-controller:${TAG}
           imagePullPolicy: Always
           # No Service selects this container's port directly anymore — the
           # broker reaches it over pod loopback only. Left as a distinct
@@ -88,7 +92,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
 
         - name: broker
-          image: ghcr.io/danny-berg-whitt/fishcam-broker:latest
+          image: ${REGISTRY}/fishcam-broker:${TAG}
           imagePullPolicy: Always
           ports:
             - containerPort: 8082

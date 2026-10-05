@@ -6,7 +6,12 @@
 #
 # Run `make help` for every target and the current settings.
 
-REGISTRY  ?= ghcr.io/danny-berg-whitt
+# Per-deployment settings: the public hostname, the node label, the registry
+# and the tag. Copy deploy.env.example to deploy.env (git-ignored) and edit
+# it; any value can also be given on the command line, e.g. TAG=abc123.
+-include deploy.env
+
+REGISTRY  ?= localhost
 TAG       ?= latest
 PLATFORM  ?= linux/arm64
 PODMAN    ?= podman
@@ -20,9 +25,13 @@ KUBECTL := $(shell if command -v kubectl >/dev/null 2>&1; then echo kubectl; \
              else echo kubectl; fi)
 endif
 
-# Must match the nodeSelector in k8s/deployment.yaml.
-WEBCAM_LABEL_KEY   := fishcam.berg-whitt.com/webcam
-WEBCAM_LABEL_VALUE := c922
+# For k8s/render.sh, which fills the manifests' ${...} placeholders.
+export WEBCAM_HOST WEBCAM_NODE_LABEL REGISTRY TAG
+
+# Pushing or deploying needs a real registry; `localhost` (the default with
+# no deploy.env) is only good for local builds and `make pod-smoke`.
+require_registry = @if [ "$(REGISTRY)" = localhost ]; then \
+	  echo "REGISTRY isn't set: copy deploy.env.example to deploy.env and set it"; exit 1; fi
 
 COMPONENTS := streamer controller broker
 ARCH       := $(lastword $(subst /, ,$(PLATFORM)))
@@ -30,7 +39,7 @@ image       = $(REGISTRY)/fishcam-$(1):$(TAG)
 
 .DEFAULT_GOAL := help
 .PHONY: help login rootfs build push release test e2e pod-smoke clean ghcr-pull-secret \
-        secret label-node deploy status logs ingress
+        secret label-node deploy deploy-check manifests status logs ingress
 
 help:
 	@echo "Targets:"
@@ -48,13 +57,16 @@ help:
 	@echo "  broker-init       create webcam-broker-tokens with one user (NAME=admin)"
 	@echo "  broker-add-user NAME=...  /  broker-list-users"
 	@echo "  ghcr-pull-secret  create the ghcr-pull secret (only for private packages)"
-	@echo "  label-node        label the node with the webcam (done by deploy)"
+	@echo "  label-node        label the node with the webcam (done by deploy); NODE=<name> to pick it"
 	@echo "  deploy            label-node, check secrets, apply configmap/deployment/service"
+	@echo "  manifests         render all manifests from deploy.env into build/k8s/ to inspect"
 	@echo "  status            deployment, pods and service"
 	@echo "  logs              recent container logs (C=streamer|controller|broker, default streamer)"
 	@echo "  ingress           publish the broker at /webcam/* (separate from deploy on purpose)"
 	@echo
-	@echo "Settings:"
+	@echo "Settings (deploy.env$(if $(wildcard deploy.env),, not found: see deploy.env.example)):"
+	@echo "  WEBCAM_HOST=$(WEBCAM_HOST)"
+	@echo "  WEBCAM_NODE_LABEL=$(WEBCAM_NODE_LABEL)"
 	@echo "  REGISTRY=$(REGISTRY)"
 	@echo "  TAG=$(TAG)"
 	@echo "  PLATFORM=$(PLATFORM)"
@@ -85,6 +97,7 @@ build: rootfs
 	done
 
 push:
+	$(require_registry)
 	@set -e; for c in $(COMPONENTS); do \
 	  $(PODMAN) push $(REGISTRY)/fishcam-$$c:$(TAG); \
 	done
@@ -112,7 +125,7 @@ pod-smoke:
 
 clean:
 	-@for c in $(COMPONENTS); do $(PODMAN) rmi $(REGISTRY)/fishcam-$$c:$(TAG) 2>/dev/null; done
-	rm -rf streamer/rootfs
+	rm -rf streamer/rootfs build
 
 # GHCR packages start out private. Either make them public in each package's
 # settings on GitHub, or give the cluster read access with this secret,
@@ -142,28 +155,46 @@ secret:
 	  echo "created webcam-hmac"; \
 	fi
 
-# Labels the node the pod's nodeSelector looks for. Already labelled is a
-# no-op; with one node it labels that one; with several it stops, since only
-# you know which has the camera plugged in.
+# Labels the node the pod's nodeSelector looks for (WEBCAM_NODE_LABEL). With
+# NODE=<name>, labels that node. Otherwise: already labelled is a no-op; with
+# one node it labels that one; with several it stops, since only you know
+# which has the camera plugged in.
 label-node:
-	@labelled=$$($(KUBECTL) get nodes -l $(WEBCAM_LABEL_KEY)=$(WEBCAM_LABEL_VALUE) -o name); \
+	@k8s/render.sh k8s/deployment.yaml >/dev/null
+	@label='$(WEBCAM_NODE_LABEL)'; \
+	if [ -n "$(NODE)" ]; then \
+	  $(KUBECTL) get node "$(NODE)" >/dev/null || exit 1; \
+	  $(KUBECTL) label node "$(NODE)" "$$label" --overwrite; \
+	  others=$$($(KUBECTL) get nodes -l "$$label" -o name | grep -vx "node/$(NODE)" || true); \
+	  if [ -n "$$others" ]; then \
+	    echo "warning: also labelled $$label, so the pod could be scheduled there:"; \
+	    printf '  %s\n' $$others; \
+	  fi; \
+	  exit 0; \
+	fi; \
+	labelled=$$($(KUBECTL) get nodes -l "$$label" -o name); \
 	if [ -n "$$labelled" ]; then \
 	  echo "already labelled: $$labelled"; exit 0; \
 	fi; \
 	nodes=$$($(KUBECTL) get nodes -o name); \
 	count=$$(printf '%s\n' "$$nodes" | grep -c . || true); \
 	if [ "$$count" -eq 1 ]; then \
-	  $(KUBECTL) label $$nodes $(WEBCAM_LABEL_KEY)=$(WEBCAM_LABEL_VALUE); \
+	  $(KUBECTL) label $$nodes "$$label"; \
 	else \
-	  echo "$$count nodes and none labelled; label the one with the webcam:"; \
+	  echo "$$count nodes and none labelled; say which has the webcam:"; \
 	  printf '  %s\n' $$nodes; \
-	  echo "  $(KUBECTL) label node <node> $(WEBCAM_LABEL_KEY)=$(WEBCAM_LABEL_VALUE)"; \
+	  echo "  make label-node NODE=<node>"; \
 	  exit 1; \
 	fi
 
+# Fails before anything is changed if the settings are missing or invalid.
+deploy-check:
+	$(require_registry)
+	@k8s/render.sh k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml >/dev/null
+
 # Checks the two secrets the pod can't start without, so a missing one fails
 # here with a pointer instead of as CreateContainerConfigError in the pod.
-deploy: label-node
+deploy: deploy-check label-node
 	@missing=0; \
 	for s in webcam-hmac:secret webcam-broker-tokens:broker-init; do \
 	  name=$${s%%:*}; target=$${s##*:}; \
@@ -172,9 +203,12 @@ deploy: label-node
 	  fi; \
 	done; \
 	[ $$missing -eq 0 ]
-	$(KUBECTL) apply -f k8s/configmap.yaml
-	$(KUBECTL) apply -f k8s/deployment.yaml
-	$(KUBECTL) apply -f k8s/service.yaml
+	k8s/render.sh -o build/k8s k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml
+	$(KUBECTL) apply -f build/k8s/configmap.yaml -f build/k8s/deployment.yaml -f build/k8s/service.yaml
+
+manifests:
+	k8s/render.sh -o build/k8s k8s/*.yaml
+	@echo "rendered into build/k8s/"
 
 status:
 	$(KUBECTL) get deployment/webcam service/webcam-broker-service
@@ -185,6 +219,7 @@ logs:
 	$(KUBECTL) logs deployment/webcam -c $(C) --tail=200
 
 ingress:
-	$(KUBECTL) apply -f k8s/ingress.yaml
+	k8s/render.sh -o build/k8s k8s/ingress.yaml
+	$(KUBECTL) apply -f build/k8s/ingress.yaml
 
 include k8s/Makefile.broker-targets.mk

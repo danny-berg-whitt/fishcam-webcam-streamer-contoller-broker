@@ -15,6 +15,7 @@ on:
   push:
     paths:
       - "client/**"
+      - "deploy.env.example"
       - ".github/workflows/client-smoketest.yml"
   workflow_dispatch:
 
@@ -104,7 +105,9 @@ jobs:
         if: matrix.target == 'web'
         # --no-wasm-dry-run skips an extra WebAssembly compatibility compile that
         # this app doesn't use; it costs time and, under act, scarce memory.
-        run: '"${FLUTTER:-flutter}" build web --release --no-wasm-dry-run'
+        # Reading deploy.env.example proves Flutter still parses the settings
+        # file that make and k8s/render.sh also read.
+        run: '"${FLUTTER:-flutter}" build web --release --no-wasm-dry-run --dart-define-from-file=../deploy.env.example'
 
       - name: flutter build apk (debug, unsigned)
         if: ${{ matrix.target == 'android' && !env.ACT }}

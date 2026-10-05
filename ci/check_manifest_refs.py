@@ -12,7 +12,10 @@ import sys
 import yaml
 
 docs = []
-for path in sorted(glob.glob("k8s/*.yaml")):
+# The manifests to check: rendered ones (CI passes a directory from
+# k8s/render.sh), else the templates in k8s/.
+manifest_dir = sys.argv[1] if len(sys.argv) > 1 else "k8s"
+for path in sorted(glob.glob(f"{manifest_dir}/*.yaml")):
     with open(path) as f:
         docs += [(path, d) for d in yaml.safe_load_all(f) if d]
 

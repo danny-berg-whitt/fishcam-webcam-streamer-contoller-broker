@@ -4,11 +4,14 @@ import 'token_dialog.dart';
 import 'token_storage.dart';
 import 'webcam_client.dart';
 
-const _baseUrl = 'https://fishcam.berg-whitt.com';
 const _prefix = '/webcam';
 
 class WebcamHomeScreen extends StatefulWidget {
-  const WebcamHomeScreen({super.key});
+  /// The broker's base URL; '' when the build wasn't given one, in which case
+  /// the screen says so and its actions stay disabled.
+  final String baseUrl;
+
+  const WebcamHomeScreen({super.key, required this.baseUrl});
 
   @override
   State<WebcamHomeScreen> createState() => _WebcamHomeScreenState();
@@ -19,6 +22,8 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
 
   WebcamClient? _client;
   Map<String, dynamic>? _lastStatus;
+
+  bool get _configured => widget.baseUrl.isNotEmpty;
   bool _busy = false;
   String? _error;
 
@@ -29,10 +34,11 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
   }
 
   Future<void> _restoreSession() async {
+    if (!_configured) return;
     final saved = await _tokenStorage.read();
     if (saved != null) {
       setState(() => _client = WebcamClient(
-            baseUrl: _baseUrl,
+            baseUrl: widget.baseUrl,
             prefix: _prefix,
             userToken: saved,
           ));
@@ -44,10 +50,11 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
   /// and returns a ready client — or null if the person cancelled.
   Future<WebcamClient?> _ensureClient() async {
     if (_client != null) return _client;
+    if (!_configured) return null;
     final token = await promptForUserToken(context);
     if (token == null) return null;
     await _tokenStorage.write(token);
-    final client = WebcamClient(baseUrl: _baseUrl, prefix: _prefix, userToken: token);
+    final client = WebcamClient(baseUrl: widget.baseUrl, prefix: _prefix, userToken: token);
     setState(() => _client = client);
     return client;
   }
@@ -115,6 +122,18 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
+            if (!_configured)
+              Card(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text(
+                    'No server configured. Build the app with '
+                    '--dart-define-from-file=../deploy.env, which sets '
+                    'WEBCAM_HOST (see deploy.env.example).',
+                  ),
+                ),
+              ),
             if (_error != null)
               Card(
                 color: Theme.of(context).colorScheme.errorContainer,
@@ -144,7 +163,7 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _busy ? null : _mute,
+                    onPressed: _busy || !_configured ? null : _mute,
                     icon: const Icon(Icons.mic_off),
                     label: const Text('Mute'),
                   ),
@@ -152,7 +171,7 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _busy ? null : _unmute,
+                    onPressed: _busy || !_configured ? null : _unmute,
                     icon: const Icon(Icons.mic),
                     label: const Text('Unmute'),
                   ),
@@ -161,7 +180,7 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: _busy ? null : _refreshStatus,
+              onPressed: _busy || !_configured ? null : _refreshStatus,
               icon: const Icon(Icons.refresh),
               label: const Text('Refresh status'),
             ),

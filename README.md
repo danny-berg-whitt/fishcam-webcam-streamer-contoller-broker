@@ -220,7 +220,8 @@ Building
 --
 
 Images are built with **podman** and published to **GitHub Container
-Registry** as `ghcr.io/danny-berg-whitt/fishcam-{streamer,controller,broker}`.
+Registry** as `<REGISTRY>/fishcam-{streamer,controller,broker}`, with
+`REGISTRY` from `deploy.env` (see "Your deployment's settings" below).
 Nothing in the build uses Docker's tools, registries or base images. The
 build files are named `Containerfile`, podman's native name.
 
@@ -239,8 +240,8 @@ By hand, for one image, this is what `make release` runs for each:
 
 ```sh
 podman build --platform linux/arm64 \
-  --tag ghcr.io/danny-berg-whitt/fishcam-broker:latest ./broker
-podman push ghcr.io/danny-berg-whitt/fishcam-broker:latest
+  --tag ghcr.io/your-github-user/fishcam-broker:latest ./broker
+podman push ghcr.io/your-github-user/fishcam-broker:latest
 ```
 
 **Base images.** The Go build stage of every image is Chainguard's Go image
@@ -295,14 +296,14 @@ enable it with `microk8s enable registry`), build and push with podman, which
 needs `--tls-verify=false` for that plain-HTTP registry:
 
 ```sh
-make build REGISTRY=fishcam.local:32000
+make build REGISTRY=<node>:32000
 for c in streamer controller broker; do
-  podman push --tls-verify=false fishcam.local:32000/fishcam-$c:latest
+  podman push --tls-verify=false <node>:32000/fishcam-$c:latest
 done
 ```
 
-The image references in `k8s/deployment.yaml` would then need to change to
-`localhost:32000/...`, which is how the kubelet on the Pi reaches it.
+Then deploy with `REGISTRY=localhost:32000` (in `deploy.env` or on the
+command line), which is how the kubelet on that node reaches the registry.
 
 Because the tag is mutable (`:latest`), the deployment sets
 `imagePullPolicy: Always` so a rollout picks up a freshly pushed image.
@@ -320,6 +321,43 @@ GHCR; delete those from the package's settings page on GitHub.
 
 Deploying
 --
+
+### Your deployment's settings
+
+Everything specific to one deployment lives in `deploy.env`, which is
+git-ignored. Start from the documented example:
+
+```sh
+cp deploy.env.example deploy.env
+```
+
+| Setting | What it is | Example |
+|---|---|---|
+| `WEBCAM_HOST` | Public hostname the ingress serves the API on | `webcam.example.com` |
+| `WEBCAM_NODE_LABEL` | `key=value` label marking the node with the webcam | `webcam=attached` |
+| `REGISTRY` | Where images are pushed and pulled | `ghcr.io/your-github-user` |
+| `TAG` | Image tag | `latest` |
+| `WEBCAM_URL` | Optional: the app's server address, if not `https://WEBCAM_HOST` | `http://localhost:8082` |
+
+`make` reads it, and `k8s/deployment.yaml` and `k8s/ingress.yaml` are
+templates whose `${...}` placeholders `k8s/render.sh` fills from it. The
+deploy targets render into `build/k8s/` and apply that, so the templates
+are never applied directly; `make manifests` renders all four for a look.
+Each value is checked against what Kubernetes accepts before anything is
+applied, and a missing one is named. Any setting can be overridden on the
+command line, e.g. `make deploy TAG=abc123`.
+
+The app reads the same file when it's built:
+
+```sh
+cd client
+flutter build apk --dart-define-from-file=../deploy.env
+```
+
+A build without it still runs, but says no server is configured and
+disables its buttons.
+
+### Deploying to the cluster
 
 `make` finds `kubectl` on its own: a plain `kubectl` if one is on PATH (a
 workstation whose `~/.kube/config` points at the cluster), falling back to
@@ -340,27 +378,27 @@ applying anything, and names the target to run if one is missing, rather
 than leaving the pod stuck in `CreateContainerConfigError`.
 
 `deploy` labels the node the pod's `nodeSelector` looks for
-(`fishcam.berg-whitt.com/webcam=c922`) before applying anything. On a
-single-node cluster there is only one candidate, so it labels it; already
-labelled is a no-op. With several nodes it stops and asks, since only you
-know which one has the camera plugged in:
+(`WEBCAM_NODE_LABEL`) before applying anything. On a single-node cluster
+there is only one candidate, so it labels it; already labelled is a no-op.
+With several nodes it stops and asks, since only you know which one has the
+camera plugged in; name it with `NODE`:
 
 ```sh
-kubectl label node <node> fishcam.berg-whitt.com/webcam=c922
+make label-node NODE=<node>
 ```
 
 Run that step alone with `make label-node`. Skipping it entirely leaves the
 pod `Pending` — `kubectl describe pod` reports `node(s) didn't match Pod's
 node affinity/selector`.
 
-Or by hand:
+Or by hand, rendering the templates first:
 
 ```sh
 kubectl create secret generic webcam-hmac \
   --from-literal=HMAC_SECRET=$(openssl rand -hex 32)
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
+set -a; . ./deploy.env; set +a
+k8s/render.sh -o build/k8s k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml
+kubectl apply -f build/k8s/
 ```
 
 The streamer container runs privileged and mounts `/dev/video0` and
@@ -379,7 +417,7 @@ The deployment uses the `Recreate` strategy: there is one physical webcam, so
 two pods must never contend for it during a rollout.
 
 For the same reason the pod carries a `nodeSelector` for
-`fishcam.berg-whitt.com/webcam=c922`. The camera is attached to one host, so
+`WEBCAM_NODE_LABEL`. The camera is attached to one host, so
 the pod has to run there; the selector is what makes that explicit. On a
 single-node cluster it changes nothing, but if a node is ever added it turns
 a baffling runtime failure — ffmpeg dying on a missing `/dev/video0` — into
@@ -625,7 +663,7 @@ root for the kubelet, which probes the pod directly.
 Calling it directly (with a user's bearer token):
 
 ```sh
-curl -X POST https://fishcam.berg-whitt.com/webcam/mute \
+curl -X POST https://$WEBCAM_HOST/webcam/mute \
   -H "Authorization: Bearer $USER_TOKEN"
 ```
 
@@ -633,8 +671,8 @@ Neither client needs to know about HMAC signing anymore — that's entirely
 internal to the Broker now:
 
 ```sh
-CONTROLLER=https://fishcam.berg-whitt.com PREFIX=/webcam TOKEN=$USER_TOKEN ./client/webcamctl.sh mute
-go run client/webcamctl.go -controller https://fishcam.berg-whitt.com -prefix /webcam -token $USER_TOKEN -action mute
+CONTROLLER=https://$WEBCAM_HOST PREFIX=/webcam TOKEN=$USER_TOKEN ./client/webcamctl.sh mute
+go run client/webcamctl.go -controller https://$WEBCAM_HOST -prefix /webcam -token $USER_TOKEN -action mute
 ```
 
 **Flutter app** (`client/`): a small Material app that stores the

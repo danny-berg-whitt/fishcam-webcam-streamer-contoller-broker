@@ -15,7 +15,7 @@ void main() {
   WebcamClient clientReturning(int status, String body) {
     requests = [];
     return WebcamClient(
-      baseUrl: 'https://fishcam.example',
+      baseUrl: 'https://webcam.example',
       prefix: '/webcam',
       userToken: _token,
       httpClient: MockClient((req) async {
@@ -44,7 +44,7 @@ void main() {
         expect(requests, hasLength(1));
         final req = requests.single;
         expect(req.method, method);
-        expect(req.url.toString(), 'https://fishcam.example/webcam/$action');
+        expect(req.url.toString(), 'https://webcam.example/webcam/$action');
         expect(req.headers['Authorization'], 'Bearer $_token');
         // The app never signs anything; HMAC is the broker's job.
         expect(req.headers.containsKey('X-Auth-Nonce'), isFalse);

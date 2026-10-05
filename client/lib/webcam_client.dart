@@ -6,7 +6,7 @@ import 'package:http/http.dart' as http;
 /// only ever presents a per-user bearer token issued out-of-band when the
 /// user was provisioned (see README: "Broker: provisioning a user").
 class WebcamClient {
-  final String baseUrl; // e.g. https://fishcam.berg-whitt.com
+  final String baseUrl; // e.g. https://webcam.example.com
   final String prefix; // e.g. /webcam — must match the broker's ROUTE_PREFIX
   final String userToken;
   final http.Client _http;
