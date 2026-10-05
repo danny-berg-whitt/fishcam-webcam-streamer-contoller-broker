@@ -10,9 +10,8 @@ import (
 	"time"
 )
 
-// fakeFFmpeg writes a shell script that stands in for ffmpeg. Each run
-// appends "start <unix nanos>" and its arguments to the returned log file,
-// then runs body.
+// fakeFFmpeg writes a stand-in ffmpeg that logs "start <unix nanos>" and its
+// arguments to the returned file, then runs body.
 func fakeFFmpeg(t *testing.T, body string) (path, logFile string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -139,9 +138,8 @@ func TestSupervisorPassesFFmpegArgs(t *testing.T) {
 	}
 }
 
-// While ffmpeg runs, the status shows it streaming with an uptime. Cancelling
-// asks ffmpeg to stop with SIGINT (so the RTMP session closes cleanly) and
-// Run returns once it has.
+// While ffmpeg runs, status shows streaming with an uptime; cancelling sends
+// SIGINT and Run returns once ffmpeg has stopped.
 func TestSupervisorRunningStateAndCleanShutdown(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "got-sigint")
 	ffmpeg, logFile := fakeFFmpeg(t,

@@ -1,12 +1,7 @@
 ---
-# Streamer tuning. Every value here maps to an environment variable read by
-# the streamer at startup; change one and restart the deployment.
-#
-# Device settings default to "auto": the streamer inspects /proc/asound and
-# /dev at startup and reports what it found in its logs. That is what lets a
-# single ConfigMap serve hosts with different webcams — an ALSA card id comes
-# from the device's USB product string, so a C922 answers to "C922" and a
-# C270 to "Webcam". Set a value explicitly to override discovery entirely.
+# Environment for the containers; restart the deployment after a change.
+# "auto" device settings are discovered at startup and logged; an explicit
+# value skips discovery.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,39 +10,30 @@ metadata:
     app: webcam
 data:
   # --- Routing -----------------------------------------------------------
-  # Read by the controller and the broker (not the streamer) through
-  # configMapKeyRef in deployment.yaml. That reference is not optional, so
-  # without this key both containers fail with CreateContainerConfigError.
-  # Public paths become /webcam/mute etc., and the broker signs the same
-  # prefixed path when it calls the controller.
+  # Required by the controller and broker (a non-optional configMapKeyRef).
   ROUTE_PREFIX: "/webcam"
 
   # --- Destination -------------------------------------------------------
   RTMP_URL: "rtmp://hls-service.default.svc.cluster.local/live/stream"
 
   # --- Capture -----------------------------------------------------------
-  # "auto" picks the lowest-numbered /dev/video* node, which is the capture
-  # node on a UVC camera. Set a path if the camera exposes several.
+  # "auto": the lowest-numbered /dev/video* node, a UVC camera's capture node.
   VIDEO_DEVICE: "auto"
-  # Neither the C922 nor the C270 has onboard H.264, so MJPEG is the
-  # efficient capture format for both.
+  # MJPEG, for webcams without onboard H.264.
   INPUT_FORMAT: "mjpeg"
   VIDEO_SIZE: "1280x720"
   FRAMERATE: "10"
-  # "auto" finds the USB card that offers a capture PCM, ignoring the Pi's
-  # HDMI and headphone outputs. With two microphones attached it refuses to
-  # guess — narrow it with ALSA_CARD_MATCH, or name the card in ALSA_CARD.
+  # "auto": the USB card with a capture PCM. With two microphones it refuses
+  # to guess; narrow it with ALSA_CARD_MATCH or name it in ALSA_CARD.
   ALSA_CARD: "auto"
   ALSA_CARD_MATCH: ""
-  # Derived from ALSA_CARD when left on auto, as plughw:CARD=<id>,DEV=0.
+  # "auto": plughw:CARD=<ALSA_CARD>,DEV=0.
   AUDIO_DEVICE: "auto"
   AUDIO_SAMPLE_RATE: "44100"
 
   # --- Encode ------------------------------------------------------------
-  # The Pi 5 dropped the hardware H.264 encoder, so this is a software
-  # encode. On a Pi 4, set VIDEO_CODEC to h264_v4l2m2m and blank both PRESET
-  # and TUNE — those are libx264-only options and the hardware encoder
-  # rejects them.
+  # Software encoding (the Pi 5 has no H.264 encoder). For a hardware encoder
+  # such as the Pi 4's h264_v4l2m2m, also set PRESET and TUNE to "".
   VIDEO_CODEC: "libx264"
   PRESET: "veryfast"
   TUNE: "zerolatency"
@@ -55,28 +41,20 @@ data:
   VIDEO_BITRATE: "2M"
   BUFSIZE: "4M"
   AUDIO_BITRATE: "128k"
-  # Keyframe interval in frames, and the real control on playback latency:
-  # nginx-rtmp can only cut an HLS segment at a keyframe, so hls_fragment can
-  # never be shorter than this. At 10 fps, 5 gives 0.5s keyframes, matching
-  # the server's hls_fragment 500ms. Raising it lengthens segments and adds
-  # latency; lowering it costs bitrate. Leave empty for twice the framerate,
-  # a conventional 2s keyframe interval that is safe with any server.
+  # Keyframe interval in frames. HLS segments are cut only at keyframes, so
+  # this is the floor on latency: 5 at 10 fps suits a 500ms hls_fragment.
+  # Empty means twice the framerate.
   GOP: "5"
 
   # --- Mute control ------------------------------------------------------
-  # "auto" picks the card's only control with a capture switch. Names are as
-  # device-specific as card ids — the C922 calls it "Mic", other devices use
-  # "Capture" — so this is discovered rather than assumed. `amixer -c <card>
-  # scontrols` lists them if you need to set it by hand.
+  # "auto": the card's only control with a capture switch. To choose one,
+  # `amixer -c <card> scontrols` lists them.
   MUTE_CONTROL: "auto"
   START_MUTED: "false"
 
   # --- Diagnostics -------------------------------------------------------
-  # ffmpeg's -loglevel. "info" prints the input stream listing and the
-  # "Stream mapping" block on every start, which is the only way to see from
-  # `make logs` which audio stream ffmpeg actually opened and at what sample
-  # rate and channel count. "warning" halves the log volume once the
-  # pipeline is known good.
+  # ffmpeg's -loglevel. "info" logs the opened streams on each start;
+  # "warning" is quieter once the pipeline is known good.
   FFMPEG_LOGLEVEL: "info"
 
   # --- Supervisor --------------------------------------------------------

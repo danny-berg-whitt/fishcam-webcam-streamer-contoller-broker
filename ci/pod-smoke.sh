@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
-# Run the three real images together as a Podman pod wired like the
-# Kubernetes pod, and exercise the public API through the broker.
+# Run the three images as a podman pod wired like k8s/deployment.yaml
+# (shared localhost, only 8082 published, the same hardening, secrets and
+# ConfigMap) and exercise the API through the broker. With no webcam, the
+# image's real ffmpeg and amixer run and fail, proving they're present and
+# that failures surface correctly.
 #
 # Usage: ci/pod-smoke.sh <name> <streamer-image> <controller-image> <broker-image>
-#
-# As in k8s/deployment.yaml: the containers share one network namespace
-# (they reach each other on localhost), only the broker's 8082 is published,
-# the controller and broker run read-only as uid 65534 with no capabilities,
-# HMAC_SECRET comes from a secret, the broker's tokens file is mounted from
-# a secret, and the streamer's environment is k8s/configmap.yaml's data.
-#
-# There's no webcam, so the streamer is told its devices (skipping
-# discovery) and the image's real ffmpeg and amixer fail against them. That
-# is the point: it proves both tools are in the image and that the
-# streamer supervises ffmpeg and reports mixer failures, end to end.
-#
-# Runs podman via $PODMAN if set (ci/podman-act.sh under act).
+# Uses $PODMAN if set (ci/podman-act.sh under act).
 set -euo pipefail
 
 name=$1 streamer_img=$2 controller_img=$3 broker_img=$4
@@ -35,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Secrets, as the cluster's webcam-hmac and webcam-broker-tokens ----------
+# --- Secrets ---------------------------------------------------------------
 token=$(openssl rand -hex 32)
 hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
 printf '{"%s":"ci"}' "$hash" > "$work/tokens.json"
@@ -44,8 +35,7 @@ openssl rand -hex 32 | tr -d '\n' > "$work/hmac"
 "$podman" secret create "$name-hmac" "$work/hmac" >/dev/null
 "$podman" secret create "$name-tokens" "$work/tokens.json" >/dev/null
 
-# --- The ConfigMap's data, as the streamer's environment ---------------------
-# Two-space-indented `KEY: "value"` lines under `data:`; see configmap.yaml.
+# --- The ConfigMap's data, as the streamer's environment --------------------
 awk '/^data:/ { d = 1; next }
      d && /^[^ #]/ { d = 0 }
      d && /^  [A-Z_]+:/ {
@@ -56,8 +46,7 @@ awk '/^data:/ { d = 1; next }
 grep -q '^ROUTE_PREFIX=/webcam$' "$work/config.env" \
   || { echo "pod-smoke: couldn't read k8s/configmap.yaml" >&2; exit 1; }
 
-# Only ever run images built locally: never pull a published image in
-# their place, which would test something other than this checkout.
+# Never pull: a published image would test something other than this tree.
 run=(run -d --pull=never --pod "$name")
 hardened=(--read-only --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges)
 
@@ -99,8 +88,7 @@ code()  { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 # shellcheck disable=SC2317  # called indirectly, via restarts_seen
 field() { python3 -c "import json,sys; print(json.load(sys.stdin)[\"$1\"])"; }
 # shellcheck disable=SC2317  # called indirectly, via check
-# Capture first: piping straight into `grep -q` under pipefail fails
-# whenever grep exits early and podman logs gets SIGPIPE.
+# Capture first: `podman logs | grep -q` can fail with SIGPIPE under pipefail.
 logs_have() {
   local out; out=$("$podman" logs "$name-$1" 2>&1 || true)
   grep -q -- "$2" <<<"$out"
@@ -122,12 +110,10 @@ done
 check "streamer read the ConfigMap"        logs_have streamer "codec=libx264"
 check "status answers through all three"   [ "$(code -H "$auth" "$base/webcam/status")" = 200 ]
 check "the image's ffmpeg is supervised"   wait_for 20 restarts_seen
-# "exit status" means the binary ran and failed; a binary missing from the
-# image fails to start instead ("executable file not found").
+# "exit status" means the binary ran; a missing one fails to start instead.
 check "the image's ffmpeg ran and exited"  logs_have streamer "ffmpeg exited after .*err=exit status"
 
-# The image's real amixer runs and fails (no sound card): the streamer
-# reports it, the controller turns it into 502, the broker relays that.
+# The real amixer fails (no sound card) and surfaces as a 502.
 check "mute failure surfaces as 502"       [ "$(code -X POST -H "$auth" "$base/webcam/mute")" = 502 ]
 check "the image's amixer ran"             logs_have streamer "amixer -c Webcam set Mic nocap: exit status"
 

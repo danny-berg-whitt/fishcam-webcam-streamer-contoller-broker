@@ -12,8 +12,7 @@ import (
 	"time"
 )
 
-// Supervisor runs ffmpeg and restarts it with exponential backoff when it
-// exits. It exposes just enough state for the status endpoint.
+// Supervisor runs ffmpeg and restarts it with exponential backoff.
 type Supervisor struct {
 	cfg *Config
 
@@ -90,8 +89,7 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		// Ask ffmpeg to finish cleanly so the RTMP session closes,
-		// then force-kill if it lingers.
+		// SIGINT lets ffmpeg close the RTMP session; kill it if it lingers.
 		_ = cmd.Process.Signal(syscall.SIGINT)
 		select {
 		case <-done:

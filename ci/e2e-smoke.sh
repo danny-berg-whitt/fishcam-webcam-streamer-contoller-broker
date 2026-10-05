@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# End-to-end test of the whole request chain the Flutter app uses, with all
-# three real binaries:
+# End-to-end test of the three real binaries:
 #
-#   curl --Bearer--> broker :8082 --HMAC--> controller :8080 --> streamer :8081
-#                                                                  |-> ffmpeg
-#                                                                  '-> amixer
+#   curl --Bearer--> broker --HMAC--> controller --> streamer --> ffmpeg, amixer
 #
-# Only the two programs the streamer drives are stand-ins: an `ffmpeg` that
-# idles until stopped and an `amixer` that records what it's asked to do. So
-# a mute is checked at the mixer, not just in a response, and killing ffmpeg
-# exercises the streamer's restart logic through the public API.
+# Only ffmpeg and amixer are stand-ins, recording what they're asked to do,
+# so mutes are checked at the mixer and an ffmpeg kill tests the restarts.
 #
 # Usage: ci/e2e-smoke.sh <controller-binary> <broker-binary> <streamer-binary>
 set -euo pipefail
@@ -38,8 +33,7 @@ trap 'exit 0' INT TERM
 while :; do sleep 0.1; done
 EOF
 chmod +x "$work/bin/amixer" "$work/bin/ffmpeg"
-# Exist from the start, so a streamer that never runs fails the checks
-# below one by one instead of aborting the script under set -e.
+# Created up front so a dead streamer fails each check, not the script.
 : > "$work/amixer.log"; : > "$work/ffmpeg.args"; : > "$work/ffmpeg.pid"
 
 pids=()
@@ -54,8 +48,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The webcam's devices are given explicitly, which skips discovery (there's
-# no camera here); everything else is the streamer's own default.
+# Explicit devices skip discovery; there's no camera here.
 PATH="$work/bin:$PATH" \
   ALSA_CARD=Webcam MUTE_CONTROL=Mic VIDEO_DEVICE=/dev/video0 \
   LISTEN_ADDR=127.0.0.1:8081 RESTART_INITIAL_BACKOFF=200ms \
@@ -67,7 +60,7 @@ HMAC_SECRET=$secret ROUTE_PREFIX=/webcam LISTEN_ADDR=127.0.0.1:8082 \
   CONTROLLER_URL=http://127.0.0.1:8080 TOKENS_FILE="$work/tokens.json" \
   "$brk_bin" >"$work/broker.log" 2>&1 & pids+=($!)
 
-# The streamer's healthz only turns 200 once ffmpeg is running.
+# The streamer's healthz is 200 only once ffmpeg runs.
 for port in 8081 8080 8082; do
   for _ in $(seq 1 40); do
     curl -fs -o /dev/null "http://127.0.0.1:$port/healthz" && break

@@ -1,7 +1,5 @@
-// Command controller exposes an authenticated HTTP API for controlling the
-// webcam streamer: microphone mute/unmute and stream status. Requests are
-// authenticated with a time-based HMAC signature plus a replay-protecting
-// nonce.
+// Command controller verifies HMAC-signed mute, unmute and status requests
+// (see auth.go) and forwards them to the streamer over pod loopback.
 package main
 
 import (
@@ -42,16 +40,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Nonces are remembered for twice the skew window: long enough that no
-	// still-acceptable timestamp can be replayed, short enough to stay small.
+	// Twice the skew window: no still-acceptable timestamp can be replayed.
 	nonces := NewNonceCache(2 * skew)
 	sweeperStop := make(chan struct{})
 	nonces.StartSweeper(sweeperStop)
 	defer close(sweeperStop)
 
-	// Mount point on the public host, e.g. "/webcam" to serve
-	// /webcam/mute alongside the cluster's /hls and /fishswitch routes.
-	// Clients sign the full prefixed path, since that is what arrives here.
+	// e.g. "/webcam". Signatures cover the full prefixed path.
 	prefix := NormalizePrefix(envStr("ROUTE_PREFIX", ""))
 
 	auth := NewAuthenticator([]byte(secret), skew, nonces)

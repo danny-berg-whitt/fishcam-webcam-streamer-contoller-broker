@@ -15,7 +15,7 @@ void main() {
   WebcamClient clientReturning(int status, String body) {
     requests = [];
     return WebcamClient(
-      baseUrl: 'https://fishcam.example',
+      baseUrl: 'https://webcam.example',
       prefix: '/webcam',
       userToken: _token,
       httpClient: MockClient((req) async {
@@ -26,8 +26,7 @@ void main() {
   }
 
   group('request shape', () {
-    // The broker returns 405 for a method mismatch, so each action must use
-    // exactly the method the API table specifies.
+    // The broker rejects any other method with 405.
     final cases = <String, (Future<Map<String, dynamic>> Function(WebcamClient), String)>{
       'status': ((c) => c.status(), 'GET'),
       'mute': ((c) => c.mute(), 'POST'),
@@ -44,7 +43,7 @@ void main() {
         expect(requests, hasLength(1));
         final req = requests.single;
         expect(req.method, method);
-        expect(req.url.toString(), 'https://fishcam.example/webcam/$action');
+        expect(req.url.toString(), 'https://webcam.example/webcam/$action');
         expect(req.headers['Authorization'], 'Bearer $_token');
         // The app never signs anything; HMAC is the broker's job.
         expect(req.headers.containsKey('X-Auth-Nonce'), isFalse);

@@ -6,9 +6,7 @@ import (
 	"net/http"
 )
 
-// API is the streamer's internal control surface. It is bound to the pod
-// network only (localhost within the pod) and carries no authentication —
-// the Controller is responsible for authenticating external callers.
+// API is unauthenticated: only the controller, in the same pod, reaches it.
 type API struct {
 	sup   *Supervisor
 	muter *Muter
@@ -50,8 +48,8 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.sup.Snapshot(a.muter.Muted()))
 }
 
-// healthz reports unhealthy while ffmpeg is not running, so Kubernetes can
-// restart the pod if the supervisor can never get a working pipeline up.
+// healthz fails while ffmpeg is down, so a liveness probe can restart a pod
+// whose pipeline never comes back.
 func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
 	if !a.sup.running.Load() {
 		writeJSONError(w, http.StatusServiceUnavailable, errNotRunning.Error())

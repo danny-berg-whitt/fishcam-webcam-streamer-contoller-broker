@@ -1,10 +1,6 @@
-# ---------- Build stage ----------
-# Runs on the build host's native architecture and cross-compiles to the
-# target, so arm64 images build at full speed on any host, with no emulation.
-# Chainguard's Go image rather than Docker Hub's golang image; this stage
-# never ships, so it only needs a Go toolchain (the image also has bash).
-# Chainguard publishes only the `latest` tag for free, so the Go version
-# floats; go.mod's `go` line is the minimum it must satisfy.
+# Build stage: runs natively on the build host and cross-compiles, so it
+# never needs emulation. Chainguard's free tier publishes only `latest`, so
+# the Go version floats above go.mod's minimum.
 FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/go:latest AS build
 USER 0
 
@@ -21,10 +17,7 @@ RUN CGO_ENABLED=0 \
     GOARCH=${TARGETARCH:-$(go env GOARCH)} \
     go build -trimpath -ldflags="-s -w" -o /out/broker .
 
-# ---------- Runtime stage ----------
-# Same rationale as the Controller: no shell, no libc, no package manager,
-# nothing an attacker could use if this process were ever compromised.
-# `scratch` is the empty image; nothing is pulled for it.
+# Runtime stage: the static binary alone.
 FROM scratch
 
 # Links the GHCR package to its source repository.

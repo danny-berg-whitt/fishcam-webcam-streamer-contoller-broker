@@ -1,20 +1,11 @@
 name: server smoketest
 
-# Minimal checks for the server side: each Go component's unit tests and
-# image build, a real broker container run with the pod's security
-# settings, the k8s manifests, and an end-to-end run of broker -> controller
-# -> stub streamer to prove the two halves of the HMAC scheme agree.
-#
-# Images are built and run with podman; nothing here uses Docker's tools,
-# actions or registries. Every job also runs locally under act on an arm64
-# host with no x86 emulation (see README, "Running CI locally"). Steps that
-# differ under act are guarded with env.ACT, which act sets and GitHub never
-# does.
+# Unit tests, image builds, manifests, an end-to-end run of the three
+# binaries, and the three images run as a pod. Also runs under act on arm64
+# (see README); act-specific steps check env.ACT, which GitHub never sets.
 
 on:
-  # Every branch, so feature branches get CI before a PR. No pull_request
-  # trigger: for branches in this repo it would run everything a second
-  # time, and a PR shows the push runs for its head commit anyway.
+  # Every branch. No pull_request trigger: it would duplicate the push runs.
   push:
     paths:
       - "broker/**"
@@ -22,6 +13,8 @@ on:
       - "controller/**"
       - "k8s/**"
       - "ci/**"
+      - "deploy.env.example"
+      - "Makefile"
       - ".github/workflows/server-smoketest.yml"
   workflow_dispatch:
 
@@ -59,8 +52,7 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # -race needs cgo and a C compiler. GitHub's runners have gcc; act's
-      # default image doesn't, so fall back to a plain run there.
+      # -race needs a C compiler, which act's image lacks.
       - name: go test
         run: |
           flags=(-count=1 -v)
@@ -79,25 +71,21 @@ jobs:
     needs: broker
     runs-on: ubuntu-latest
     env:
-      # Unique per run, since under act these land on your shared Podman host.
+      # Unique per run: under act these share your Podman host.
       SMOKE: fishcam-broker-smoke-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
 
-      # GitHub's runners have podman. act's job image doesn't, so under act
-      # every podman command goes through ci/podman-act.sh, which drives the
-      # host's Podman over the socket act mounts into the job container.
+      # act's job image has no podman; ci/podman-act.sh drives the host's.
       - name: Use the host's Podman (act)
         if: ${{ env.ACT }}
         run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
 
       - run: '"${PODMAN:-podman}" version'
 
-      # The runtime stage is FROM scratch with no RUN, and the build stage
-      # runs on $BUILDPLATFORM and cross-compiles, so both architectures
-      # build without emulation. The check afterwards guards against a
-      # podman layer-cache quirk that can reuse one architecture's result
-      # for the other when the per-architecture outputs are identical.
+      # Builds without emulation (cross-compiled, FROM scratch). The check
+      # guards against podman's layer cache reusing one architecture's
+      # result for the other.
       - name: Build linux/amd64 + linux/arm64 (not pushed)
         run: |
           "${PODMAN:-podman}" manifest rm "$SMOKE:multi" >/dev/null 2>&1 || true
@@ -108,9 +96,7 @@ jobs:
           echo "manifest architectures: $archs"
           [ "$archs" = "amd64,arm64" ] || { echo "::error::expected amd64,arm64"; exit 1; }
 
-      # No --platform, so this builds for the machine it runs on: amd64 on
-      # GitHub, arm64 under act on Apple Silicon. Either way the image runs
-      # natively in the next steps, with no emulation.
+      # Native platform, so it runs without emulation in the next steps.
       - name: Build a native image for a local run
         run: '"${PODMAN:-podman}" build --tag "$SMOKE:native" broker'
 
@@ -130,14 +116,12 @@ jobs:
           hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
           printf '{"%s":"ci"}' "$hash" > "$RUNNER_TEMP/tokens.json"
 
-          # The token file goes in as a Podman secret mounted where the pod
-          # mounts it. Unlike a bind mount, a secret's contents are sent from
-          # the client, so this also works when podman is remote (under act).
+          # A secret, not a bind mount, so it also works with remote podman.
           "$podman" secret rm "$SMOKE" >/dev/null 2>&1 || true
           "$podman" secret create "$SMOKE" "$RUNNER_TEMP/tokens.json" >/dev/null
 
-          # CONTROLLER_URL points at a closed port, so authenticated calls
-          # prove the broker got as far as signing and forwarding (502).
+          # A closed CONTROLLER_URL: a 502 proves the broker got as far as
+          # forwarding.
           "$podman" rm -f "$SMOKE" >/dev/null 2>&1 || true
           "$podman" run -d --name "$SMOKE" -p 8082:8082 \
             --read-only --user 65534:65534 --cap-drop ALL \
@@ -176,8 +160,7 @@ jobs:
           check 404 "unprefixed path is not served"    -X POST -H "$auth" "$base/mute"
           check 502 "valid token reaches the upstream" -H "$auth" "$base/webcam/status"
 
-          # Capture first: piping straight into `grep -q` under pipefail can
-          # fail when grep exits early and podman logs gets SIGPIPE.
+          # Capture first: `podman logs | grep -q` can fail with SIGPIPE.
           logs=$("$podman" logs "$SMOKE" 2>&1 || true)
           grep -q "loaded 1 user token" <<<"$logs" \
             || { echo "::error::token file was not loaded"; fail=1; }
@@ -205,10 +188,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Picks the build for this machine's architecture, and is called by
-      # its full path rather than added to $GITHUB_PATH: under act, adding
-      # to the path makes act rebuild PATH for later steps, which is where
-      # the earlier "node not found" failure came from.
+      # Called by full path: under act, changing $GITHUB_PATH can lose
+      # `node` for later steps.
       - name: Install kubeconform
         run: |
           case "$(uname -m)" in
@@ -219,13 +200,16 @@ jobs:
           curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-${arch}.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP" kubeconform
 
-      - name: Validate schemas
-        run: '"$RUNNER_TEMP/kubeconform" -strict -summary -output text k8s/*.yaml'
+      # Validate the manifests as rendered with the example settings.
+      - name: Render with deploy.env.example
+        run: |
+          set -a; . ./deploy.env.example; set +a
+          k8s/render.sh -o "$RUNNER_TEMP/k8s" k8s/*.yaml
 
-      # kubeconform can't see that a configMapKeyRef names a key the
-      # ConfigMap doesn't define; that only fails at runtime. Uses the
-      # machine's own python3 (present on GitHub's runners and in act's
-      # image), installing PyYAML into a throwaway venv only if needed.
+      - name: Validate schemas
+        run: '"$RUNNER_TEMP/kubeconform" -strict -summary -output text "$RUNNER_TEMP"/k8s/*.yaml'
+
+      # Catches what a schema check can't (see the script).
       - name: Cross-check ConfigMap references
         run: |
           py=python3
@@ -234,7 +218,7 @@ jobs:
             "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml
             py="$RUNNER_TEMP/venv/bin/python"
           fi
-          "$py" ci/check_manifest_refs.py
+          "$py" ci/check_manifest_refs.py "$RUNNER_TEMP/k8s"
 
   e2e:
     name: e2e · broker → controller → streamer
@@ -254,8 +238,6 @@ jobs:
             go build -C "$c" -o "$RUNNER_TEMP/$c" .
           done
 
-      # The real binaries end to end; only the ffmpeg and amixer that the
-      # streamer drives are stand-ins, which record what they're asked to do.
       - name: Run the request chain
         run: ci/e2e-smoke.sh "$RUNNER_TEMP/controller" "$RUNNER_TEMP/broker" "$RUNNER_TEMP/streamer"
 
@@ -304,7 +286,7 @@ jobs:
     needs: [broker-image, go-component]
     runs-on: ubuntu-latest
     env:
-      # Unique per run, since under act these land on your shared Podman host.
+      # Unique per run: under act these share your Podman host.
       POD: fishcam-pod-smoke-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
@@ -313,15 +295,10 @@ jobs:
         if: ${{ env.ACT }}
         run: echo "PODMAN=$GITHUB_WORKSPACE/ci/podman-act.sh" >> "$GITHUB_ENV"
 
-      # The streamer's runtime stage is built from Alpine's own root
-      # filesystem tarball rather than a registry image.
       - name: Fetch Alpine's root filesystem
         run: streamer/fetch-rootfs.sh
 
-      # Native platform only (amd64 on GitHub, arm64 under act on Apple
-      # Silicon), so the streamer's `apk` install and its ffmpeg capability
-      # assertions never run under emulation. The broker job's multi-arch
-      # build already covers cross-building.
+      # Native platform only: the streamer's `apk add` never runs emulated.
       - name: Build all three images (native platform, not pushed)
         run: |
           for c in streamer controller broker; do

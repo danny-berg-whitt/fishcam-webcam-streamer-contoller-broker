@@ -13,19 +13,13 @@ import (
 	"strings"
 )
 
-// Device discovery, so one image and one ConfigMap can serve hosts with
-// different webcams. ALSA card ids are derived by snd-usb-audio from each
-// device's USB product string — a C922 Pro Stream registers as "C922", a
-// C270 as "Webcam" — so hardcoding one breaks the other.
-//
-// Everything here reads plain text from /proc and /dev. No cgo, no external
-// dependencies, and the parsing is separated from the filesystem so it can
-// be tested without hardware.
+// Device discovery from /proc/asound and /dev. Parsing is kept apart from
+// the filesystem so it can be tested without hardware.
 
 // SoundCard is one entry from /proc/asound/cards.
 type SoundCard struct {
 	Index  int
-	ID     string // ALSA id: what ffmpeg's CARD= and amixer -c both want
+	ID     string // what ffmpeg's CARD= and amixer -c both take
 	Driver string // e.g. "USB-Audio"
 	Name   string
 }
@@ -34,12 +28,10 @@ func (c SoundCard) String() string {
 	return fmt.Sprintf("%d:%s (%s, %s)", c.Index, c.ID, c.Driver, c.Name)
 }
 
-// /proc/asound/cards holds two lines per card:
+// /proc/asound/cards has two lines per card; only the first matters:
 //
-//	1 [C922           ]: USB-Audio - C922 Pro Stream Webcam
-//	                     Generic C922 Pro Stream Webcam at usb-xhci-hcd.1-1.3
-//
-// Only the first carries the fields we need; continuation lines are skipped.
+//	1 [<id>           ]: <driver> - <name>
+//	                     <long name>
 var cardLineRE = regexp.MustCompile(`^\s*(\d+)\s+\[([^\]]+)\]\s*:\s*(\S+)\s*-\s*(.*)$`)
 
 // ParseSoundCards reads the contents of /proc/asound/cards.
@@ -65,14 +57,10 @@ func ParseSoundCards(r io.Reader) ([]SoundCard, error) {
 	return cards, sc.Err()
 }
 
-// SelectCaptureCard picks the card to record from.
-//
-// hasCapture reports whether a card index offers a capture PCM, which filters
-// out playback-only devices such as the Pi's HDMI and headphone outputs.
-// When hint is set, only cards whose id or name contain it (case-insensitively)
-// are considered; otherwise USB cards are preferred, a webcam mic always being
-// one. An ambiguous result is an error rather than a guess — picking the wrong
-// microphone is worse than refusing to start.
+// SelectCaptureCard picks the card to record from: cards with a capture PCM
+// (hasCapture), narrowed by hint if set (id or name, case-insensitive), else
+// preferring USB. Ambiguity is an error: the wrong microphone is worse than
+// refusing to start.
 func SelectCaptureCard(cards []SoundCard, hint string, hasCapture func(int) bool) (SoundCard, error) {
 	var candidates []SoundCard
 	for _, c := range cards {
@@ -145,8 +133,7 @@ func DetectCaptureCard(procAsound, hint string) (SoundCard, error) {
 	return SelectCaptureCard(cards, hint, procCaptureCheck(procAsound))
 }
 
-// procCaptureCheck reports whether /proc/asound/cardN contains a capture PCM.
-// ALSA names those pcm<N>c; playback devices are pcm<N>p.
+// procCaptureCheck looks for a capture PCM (pcm<N>c) in /proc/asound/cardN.
 func procCaptureCheck(procAsound string) func(int) bool {
 	return func(index int) bool {
 		matches, err := filepath.Glob(filepath.Join(procAsound, fmt.Sprintf("card%d", index), "pcm*c"))
@@ -156,9 +143,8 @@ func procCaptureCheck(procAsound string) func(int) bool {
 
 var videoNodeRE = regexp.MustCompile(`^video(\d+)$`)
 
-// SelectVideoNode returns the lowest-numbered V4L2 node from a list of
-// /dev entry names. A UVC camera may expose several nodes (capture first,
-// then metadata), and the capture node is conventionally the lowest.
+// SelectVideoNode returns the lowest-numbered /dev/video node: a UVC camera
+// also exposes metadata nodes, numbered after the capture node.
 func SelectVideoNode(entries []string) (string, error) {
 	var nums []int
 	for _, e := range entries {

@@ -4,8 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 final _validToken = 'a1' * 32; // 64 lowercase hex characters
 
-/// Pumps a page with a button that opens the dialog, opens it, and returns
-/// the pending result so each test can drive the dialog and then await it.
+/// Opens the dialog and returns its pending result.
 Future<Future<String?>> _openDialog(WidgetTester tester) async {
   late Future<String?> result;
   await tester.pumpWidget(MaterialApp(

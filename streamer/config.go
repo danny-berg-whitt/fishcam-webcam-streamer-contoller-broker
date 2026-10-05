@@ -8,26 +8,24 @@ import (
 	"time"
 )
 
-// autoValue marks a setting the streamer should discover at startup rather
-// than be told. Empty means the same thing.
+// autoValue (or empty) means "discover at startup".
 const autoValue = "auto"
 
-// Config holds all streamer settings, populated from environment variables
-// so the same image can be reconfigured from the Kubernetes manifest.
+// Config holds all streamer settings, read from the environment.
 type Config struct {
 	// Media pipeline
 	RTMPURL     string // where ffmpeg publishes the stream
 	VideoDevice string // V4L2 device node, or "auto"
-	InputFormat string // pixel format requested from the camera (C922: mjpeg)
+	InputFormat string // format requested from the camera, e.g. mjpeg
 	VideoSize   string // WxH
 	Framerate   int
 
-	VideoCodec   string // libx264 on the Pi 5; h264_v4l2m2m where hardware exists
-	Preset       string // libx264 only — omitted when empty
-	Tune         string // libx264 only — omitted when empty
+	VideoCodec   string // libx264, or e.g. h264_v4l2m2m where hardware exists
+	Preset       string // libx264 only; omitted when empty
+	Tune         string // libx264 only; omitted when empty
 	PixelFormat  string
 	VideoBitrate string
-	BufSize      string // rate-control buffer; typically 2x bitrate
+	BufSize      string // rate-control buffer, typically 2x bitrate
 	GOP          int    // keyframe interval in frames; 0 = twice the framerate
 
 	AudioDevice     string // ALSA device for ffmpeg, or "auto"
@@ -36,8 +34,8 @@ type Config struct {
 
 	// Mute control
 	AlsaCard    string // card id passed to amixer -c, or "auto"
-	CardMatch   string // substring narrowing auto-detection when several cards match
-	MuteControl string // simple mixer control toggled cap/nocap
+	CardMatch   string // narrows auto-detection when several cards match
+	MuteControl string // mixer control toggled cap/nocap
 	StartMuted  bool
 
 	// Supervisor
@@ -62,11 +60,8 @@ func envStr(key, def string) string {
 	return def
 }
 
-// envStrAllowEmpty distinguishes "not set" from "set to empty", which matters
-// wherever the empty string is a meaningful choice rather than an absence —
-// PRESET and TUNE, where it means "omit this flag". Plain envStr cannot
-// express that, since a ConfigMap value of "" is indistinguishable from an
-// unset variable to os.Getenv.
+// envStrAllowEmpty tells "unset" from "set to empty", which os.Getenv can't;
+// PRESET and TUNE use "" to mean "omit this flag".
 func envStrAllowEmpty(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
@@ -110,9 +105,8 @@ func envDuration(key string, def time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
-// LoadConfig reads configuration from the environment. Device-specific
-// settings default to "auto" so one ConfigMap can serve hosts with different
-// webcams; see Resolve.
+// LoadConfig reads the environment. Device settings default to "auto"; see
+// Resolve.
 func LoadConfig() (*Config, error) {
 	c := &Config{
 		RTMPURL:      envStr("RTMP_URL", "rtmp://hls-service.default.svc.cluster.local/live/stream"),
@@ -145,13 +139,9 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	if c.GOP == 0 {
-		// nginx-rtmp can only cut an HLS segment at a keyframe, so the
-		// keyframe interval — not hls_fragment — sets the floor on segment
-		// duration and therefore on playback latency. Twice the framerate is
-		// a 2s keyframe interval: the conventional HLS default, safe with any
-		// server's segment length and cheap on bitrate. Set GOP explicitly to
-		// trade bitrate for latency — the ConfigMap ships 5, giving 0.5s
-		// keyframes to match this cluster's hls_fragment 500ms.
+		// HLS segments can only be cut at keyframes, so GOP, not the
+		// server's fragment length, sets the floor on latency. The default
+		// is a 2s interval; a smaller GOP trades bitrate for latency.
 		c.GOP = 2 * c.Framerate
 		if c.GOP < 1 {
 			c.GOP = 1
@@ -177,13 +167,9 @@ func LoadConfig() (*Config, error) {
 
 func isAuto(v string) bool { return v == "" || v == autoValue }
 
-// Resolve fills in whatever was left on "auto" by inspecting the host.
-//
-// The ALSA card is the setting that actually differs between machines: the
-// id is derived from the webcam's USB product string, not chosen for its
-// role (a C922 Pro Stream, "C922 Pro Stream Webcam", answers to "Webcam",
-// not "C922"). Detecting it means the same ConfigMap works across cameras.
-// An explicit value always wins.
+// Resolve discovers whatever was left on "auto"; explicit values win. ALSA
+// card ids derive from each webcam's USB product string, so they differ
+// between models and can't usefully be hardcoded.
 func (c *Config) Resolve() error {
 	if isAuto(c.AlsaCard) {
 		card, err := DetectCaptureCard(c.ProcAsound, c.CardMatch)
@@ -194,8 +180,7 @@ func (c *Config) Resolve() error {
 		log.Printf("detected capture card %s", card)
 	}
 
-	// The mixer wants the card id; ffmpeg wants a full ALSA device string.
-	// Deriving the second from the first keeps them from drifting apart.
+	// Derived from the card id, so the two can't disagree.
 	if isAuto(c.AudioDevice) {
 		c.AudioDevice = fmt.Sprintf("plughw:CARD=%s,DEV=0", c.AlsaCard)
 	}
@@ -211,17 +196,13 @@ func (c *Config) Resolve() error {
 	return nil
 }
 
-// FFmpegArgs builds the ffmpeg argument list for the configured pipeline:
-// V4L2 + ALSA capture, H.264 encode, FLV mux, RTMP publish. Call after
-// Resolve.
+// FFmpegArgs builds the ffmpeg command line. Call after Resolve.
 func (c *Config) FFmpegArgs() []string {
 	args := []string{
 		"-hide_banner",
 		"-nostdin",
-		// Suppress the continuously-rewritten "frame= ... fps= ..." progress
-		// line. It is written to stderr whether or not stderr is a terminal,
-		// so at -loglevel info it would otherwise flood the pod log and bury
-		// the startup block that makes info level worth having.
+		// The progress line is written even without a terminal and would
+		// flood the pod log.
 		"-nostats",
 		"-loglevel", c.LogLevel,
 
@@ -245,9 +226,7 @@ func (c *Config) FFmpegArgs() []string {
 		"-c:v", c.VideoCodec,
 	}
 
-	// -preset and -tune are libx264 options. Hardware encoders — notably
-	// h264_v4l2m2m on the Pi 4 — reject them outright, so both are omitted
-	// when set to the empty string.
+	// libx264 options, which hardware encoders such as h264_v4l2m2m reject.
 	if c.Preset != "" {
 		args = append(args, "-preset", c.Preset)
 	}

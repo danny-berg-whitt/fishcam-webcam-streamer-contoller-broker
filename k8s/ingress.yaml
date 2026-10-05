@@ -1,15 +1,14 @@
+# Template: `make ingress` fills the ${...} placeholders via k8s/render.sh.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: webcam-ingress
 spec:
   rules:
-    - host: fishcam.berg-whitt.com
+    - host: ${WEBCAM_HOST}
       http:
         paths:
-          # The broker serves /webcam itself (ROUTE_PREFIX), the same way
-          # the Controller used to — no rewrite in front of it, so the
-          # signed/authenticated path and the received path stay identical.
+          # No rewrite: the broker serves ROUTE_PREFIX itself.
           - path: /webcam/mute
             pathType: Exact
             backend:
@@ -22,6 +21,5 @@ spec:
             pathType: Exact
             backend:
               service: { name: webcam-broker-service, port: { number: 8082 } }
-          # /webcam/healthz is deliberately NOT routed — pathType: Exact on
-          # the three paths above means it's simply unmatched and 404s at
-          # the ingress. Kubelet still probes it directly, pod-internal.
+          # /webcam/healthz is deliberately unrouted; the kubelet probes the
+          # pod directly.

@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// StreamerClient talks to the streamer's internal control API, which runs in
-// the same pod.
+// StreamerClient calls the streamer's internal API in the same pod.
 type StreamerClient struct {
 	baseURL string
 	http    *http.Client

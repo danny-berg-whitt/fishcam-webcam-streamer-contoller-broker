@@ -15,9 +15,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Framerate != 10 {
 		t.Errorf("Framerate = %d, want 10", cfg.Framerate)
 	}
-	// Twice the framerate: a 2s keyframe interval, the conventional HLS
-	// default. The ConfigMap overrides it with 5 for this cluster's 500ms
-	// fragments; this asserts only the fallback for an unset GOP.
+	// Unset GOP falls back to twice the framerate (a 2s keyframe interval).
 	if cfg.GOP != 20 {
 		t.Errorf("GOP = %d, want 2*framerate = 20", cfg.GOP)
 	}
@@ -103,7 +101,7 @@ func fakeHost(t *testing.T, cardsFile string, captureIdx []int, videoNodes []str
 	return procAsound, devDir
 }
 
-// The whole point: identical config, two different cameras, correct result.
+// Identical config, two different cameras, each resolved correctly.
 func TestResolveDiscoversCardPerHost(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -218,8 +216,7 @@ func TestFFmpegArgs(t *testing.T) {
 	}
 }
 
-// -preset and -tune are libx264-only. A hardware encoder such as the Pi 4's
-// h264_v4l2m2m rejects them, so empty values must drop the flags entirely.
+// Empty -preset and -tune must drop the flags, which hardware encoders reject.
 func TestFFmpegArgsOmitsEmptyPresetAndTune(t *testing.T) {
 	t.Setenv("VIDEO_CODEC", "h264_v4l2m2m")
 	t.Setenv("PRESET", "")
@@ -232,8 +229,7 @@ func TestFFmpegArgsOmitsEmptyPresetAndTune(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	// Setting these to "" in the ConfigMap must actually take effect — an
-	// empty value here means "omit the flag", not "use the default".
+	// "" means "omit the flag", not "use the default".
 	if cfg.Preset != "" || cfg.Tune != "" {
 		t.Fatalf("empty PRESET/TUNE fell back to defaults: preset=%q tune=%q", cfg.Preset, cfg.Tune)
 	}

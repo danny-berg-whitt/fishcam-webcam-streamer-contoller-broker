@@ -28,14 +28,9 @@ func NormalizePrefix(p string) string {
 	return "/" + p
 }
 
-// Handler mounts the API under the configured prefix.
-//
-// The controller serves the prefixed paths itself rather than sitting behind
-// an ingress rewrite. That is deliberate: the HMAC signature covers the
-// request path, so a rewrite between client and controller would leave the
-// client signing one path while the controller verifies another, and every
-// request would fail authentication for reasons invisible in the logs.
-// Serving the real path end to end keeps the two identical.
+// Handler serves the prefixed paths itself, not behind a rewrite: the
+// signature covers the path, so a rewrite would make the signed and verified
+// paths differ and every request fail authentication.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -43,9 +38,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle(a.prefix+"/unmute", a.auth.Middleware(a.unmute()))
 	mux.Handle(a.prefix+"/status", a.auth.Middleware(a.status()))
 
-	// Liveness for Kubernetes; unauthenticated and reveals nothing. Left at
-	// the root because the kubelet probes the pod directly, never through
-	// the ingress.
+	// Unauthenticated and never prefixed: probed by the kubelet directly.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
