@@ -26,8 +26,7 @@ void main() {
   }
 
   group('request shape', () {
-    // The broker returns 405 for a method mismatch, so each action must use
-    // exactly the method the API table specifies.
+    // The broker rejects any other method with 405.
     final cases = <String, (Future<Map<String, dynamic>> Function(WebcamClient), String)>{
       'status': ((c) => c.status(), 'GET'),
       'mute': ((c) => c.mute(), 'POST'),

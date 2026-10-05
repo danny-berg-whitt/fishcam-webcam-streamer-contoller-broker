@@ -1,17 +1,10 @@
 name: client smoketest
 
-# Minimal checks for the Flutter app: static analysis, unit and widget
-# tests with no network or device, then a compile for web and Android.
-#
-# Under act (env.ACT is set) Flutter comes from a git checkout via
-# ci/flutter-sdk.sh instead of subosito/flutter-action, whose Linux
-# downloads are x64-only; that lets this run natively on an arm64
-# container. The Android build is skipped under act.
+# Analyze, test, and build for web and Android. Under act (env.ACT), Flutter
+# comes from ci/flutter-sdk.sh and the Android build is skipped.
 
 on:
-  # Every branch, so feature branches get CI before a PR. No pull_request
-  # trigger: for branches in this repo it would run everything a second
-  # time, and a PR shows the push runs for its head commit anyway.
+  # Every branch. No pull_request trigger: it would duplicate the push runs.
   push:
     paths:
       - "client/**"
@@ -37,16 +30,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # pubspec.lock requires Flutter >= 3.38.4 / Dart >= 3.11, so track
-      # stable rather than pinning an older release.
+      # pubspec.lock needs Flutter >= 3.38.4.
       - uses: subosito/flutter-action@v2
         if: ${{ !env.ACT }}
         with:
           channel: stable
           cache: true
 
-      # FLUTTER goes into $GITHUB_ENV rather than $GITHUB_PATH on purpose:
-      # changing the path under act makes it rebuild PATH for later steps.
+      # $GITHUB_ENV, not $GITHUB_PATH, which under act can lose `node`.
       - name: Use Flutter from a git checkout (act)
         if: ${{ env.ACT }}
         run: echo "FLUTTER=$GITHUB_WORKSPACE/ci/flutter-sdk.sh" >> "$GITHUB_ENV"
@@ -55,8 +46,6 @@ jobs:
 
       - run: '"${FLUTTER:-flutter}" pub get'
 
-      # Warnings and errors fail the job; lint "info" hints are reported
-      # but don't block a smoke test.
       - name: flutter analyze
         run: '"${FLUTTER:-flutter}" analyze --no-fatal-infos'
 
@@ -74,8 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # act's image has no Android SDK or JDK, and Google's Linux Android
-      # build tools are x86-64 only, so there's no native arm64 route.
+      # No arm64 Linux Android build tools exist.
       - name: Android build skipped (act)
         if: ${{ matrix.target == 'android' && env.ACT }}
         run: echo "::notice::Android build skipped under act; it runs on GitHub."
@@ -103,10 +91,8 @@ jobs:
 
       - name: flutter build web
         if: matrix.target == 'web'
-        # --no-wasm-dry-run skips an extra WebAssembly compatibility compile that
-        # this app doesn't use; it costs time and, under act, scarce memory.
-        # Reading deploy.env.example proves Flutter still parses the settings
-        # file that make and k8s/render.sh also read.
+        # --no-wasm-dry-run skips an unneeded extra compile. Reading
+        # deploy.env.example checks Flutter can still parse it.
         run: '"${FLUTTER:-flutter}" build web --release --no-wasm-dry-run --dart-define-from-file=../deploy.env.example'
 
       - name: flutter build apk (debug, unsigned)

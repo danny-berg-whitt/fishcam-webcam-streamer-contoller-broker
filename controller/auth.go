@@ -37,10 +37,8 @@ var (
 	errSignature = errors.New("signature mismatch")
 )
 
-// NonceCache remembers recently used nonces for the duration of the clock
-// skew window. Entries are evicted by a single background sweeper rather
-// than a goroutine per request, so a flood of requests cannot spawn
-// unbounded goroutines.
+// NonceCache remembers nonces for the skew window. One background sweeper
+// evicts them, so a flood of requests can't spawn a goroutine each.
 type NonceCache struct {
 	ttl time.Duration
 
@@ -149,8 +147,8 @@ func (a *Authenticator) Verify(r *http.Request) error {
 		return errSignature
 	}
 
-	// Only burn the nonce once the signature is known-good, so an attacker
-	// cannot invalidate a legitimate client's nonce with a forged request.
+	// Consume the nonce only after the signature checks out, so a forged
+	// request can't burn a legitimate client's nonce.
 	if !a.nonces.Add(nonce, now) {
 		return errReplay
 	}

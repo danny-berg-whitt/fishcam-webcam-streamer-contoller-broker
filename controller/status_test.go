@@ -9,9 +9,8 @@ import (
 	"time"
 )
 
-// recordingStreamer answers like the streamer's API but only on the method
-// each endpoint accepts, recording every request it sees. code and body let
-// a test make it misbehave.
+// recordingStreamer accepts only each endpoint's real method and records
+// every request; code and body make it misbehave.
 type recordingStreamer struct {
 	mu   sync.Mutex
 	seen []string // "METHOD PATH"
@@ -79,8 +78,8 @@ func TestStatusForwardsStreamerState(t *testing.T) {
 	}
 }
 
-// Each action reaches the streamer with the method its API requires; a
-// mismatch there would surface as a 405 from the streamer, i.e. a 502 here.
+// Each action uses the method the streamer requires (a mismatch would be a
+// 405 there, a 502 here).
 func TestControllerUsesStreamerMethods(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	up := &recordingStreamer{}
@@ -133,8 +132,7 @@ func TestStreamerFailuresBecome502(t *testing.T) {
 	}
 }
 
-// The sweeper started in main evicts expired nonces on its own and stops
-// when asked, so the cache can't grow without bound.
+// The sweeper evicts expired nonces on its own and stops when told to.
 func TestNonceCacheSweeperRunsAndStops(t *testing.T) {
 	c := NewNonceCache(50 * time.Millisecond)
 	stop := make(chan struct{})
@@ -160,8 +158,8 @@ func TestNonceCacheSweeperRunsAndStops(t *testing.T) {
 	}
 }
 
-// Request logs name the real client: the first X-Forwarded-For entry
-// (Traefik's), else the connection's address.
+// Logs name the original client: the first X-Forwarded-For entry, else the
+// connection's address.
 func TestClientIP(t *testing.T) {
 	for _, tc := range []struct{ xff, remote, want string }{
 		{"", "10.1.2.3:5555", "10.1.2.3:5555"},

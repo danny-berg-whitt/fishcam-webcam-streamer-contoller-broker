@@ -11,8 +11,7 @@ import (
 	"sync"
 )
 
-// amixerOutput runs amixer and returns its combined output. A variable so
-// tests can substitute canned output instead of needing a sound card.
+// amixerOutput is a variable so tests can replace it.
 var amixerOutput = func(args ...string) (string, error) {
 	out, err := exec.Command("amixer", args...).CombinedOutput()
 	return string(out), err
@@ -47,9 +46,8 @@ func ParseMixerControls(out string) []MixerControl {
 	return controls
 }
 
-// HasCaptureSwitch reads `amixer sget <control>` output and reports whether
-// the control can actually be muted. ALSA spells a capture switch "cswitch"
-// in the capabilities line; a playback-only control has "pswitch" instead.
+// HasCaptureSwitch reports whether `amixer sget <control>` output shows a
+// capture switch ("cswitch"; playback-only controls have "pswitch").
 func HasCaptureSwitch(sget string) bool {
 	for _, line := range strings.Split(sget, "\n") {
 		line = strings.TrimSpace(line)
@@ -65,12 +63,9 @@ func HasCaptureSwitch(sget string) bool {
 	return false
 }
 
-// DetectMuteControl finds the mixer control that mutes capture on a card.
-//
-// Control names are as device-specific as card ids — this webcam calls it
-// "Mic", others use "Capture" or "Mic Capture" — so the name is discovered
-// rather than assumed. Controls without a capture switch are skipped, and an
-// ambiguous result is an error.
+// DetectMuteControl finds the card's one control with a capture switch.
+// Names vary by device ("Mic", "Capture", "Mic Capture"); more than one
+// candidate is an error.
 func DetectMuteControl(card string) (string, error) {
 	out, err := amixerOutput("-c", card, "scontrols")
 	if err != nil {
@@ -113,8 +108,8 @@ func describeControls(controls []MixerControl) string {
 	return strings.Join(names, "; ")
 }
 
-// Muter toggles the webcam microphone at the ALSA level, so the encoded
-// stream carries silence while ffmpeg keeps running uninterrupted.
+// Muter switches capture at the ALSA level, so the stream carries silence
+// without ffmpeg restarting.
 type Muter struct {
 	card    string
 	control string

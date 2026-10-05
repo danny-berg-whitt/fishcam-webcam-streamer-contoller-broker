@@ -1,15 +1,10 @@
-# ---------- Build stage ----------
-# Runs on the build host's native architecture and cross-compiles to the
-# target, so arm64 images build at full speed on any host, with no emulation.
-# Chainguard's Go image rather than Docker Hub's golang image; this stage
-# never ships, so it only needs a Go toolchain (the image also has bash).
-# Chainguard publishes only the `latest` tag for free, so the Go version
-# floats; go.mod's `go` line is the minimum it must satisfy.
+# Build stage: runs natively on the build host and cross-compiles, so it
+# never needs emulation. Chainguard's free tier publishes only `latest`, so
+# the Go version floats above go.mod's minimum.
 FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/go:latest AS build
 USER 0
 
-# Set automatically by podman build. The fallbacks below cover builders
-# that leave them empty, building for the host architecture.
+# Set by podman build; the fallbacks below build for the host if empty.
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -23,14 +18,8 @@ RUN CGO_ENABLED=0 \
     GOARCH=${TARGETARCH:-$(go env GOARCH)} \
     go build -trimpath -ldflags="-s -w" -o /out/controller .
 
-# ---------- Runtime stage ----------
-# Nothing but the statically linked binary: no shell, no libc, no package
-# manager, no third-party base image. The controller is CGO-free and its only
-# outbound call is plain HTTP to the streamer over pod loopback, so it needs
-# neither a CA bundle nor tzdata (log timestamps are UTC without it).
-#
-# If it ever needs to reach an external HTTPS endpoint, add:
-#   COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Runtime stage: the static binary alone. No CA bundle or tzdata, since its
+# only outbound call is plain HTTP over pod loopback (logs are in UTC).
 FROM scratch
 
 # Links the GHCR package to its source repository.
@@ -39,7 +28,7 @@ LABEL org.opencontainers.image.description="FishCam controller: HMAC-authenticat
 
 COPY --from=build /out/controller /usr/local/bin/controller
 
-# nobody:nogroup. Numeric because scratch has no /etc/passwd to resolve names.
+# nobody:nogroup, numeric because scratch has no /etc/passwd.
 USER 65534:65534
 
 EXPOSE 8080

@@ -12,8 +12,7 @@ import sys
 import yaml
 
 docs = []
-# The manifests to check: rendered ones (CI passes a directory from
-# k8s/render.sh), else the templates in k8s/.
+# A directory of rendered manifests, else the templates in k8s/.
 manifest_dir = sys.argv[1] if len(sys.argv) > 1 else "k8s"
 for path in sorted(glob.glob(f"{manifest_dir}/*.yaml")):
     with open(path) as f:
@@ -48,9 +47,8 @@ for path, d in docs:
                 ref = vf["secretKeyRef"]
                 print(f"info: {c['name']}.{env['name']} expects Secret {ref['name']}/{ref['key']} (created outside git)")
 
-# The streamer's /healthz fails during every pause between ffmpeg restarts,
-# so its liveness window must outlast the longest pause, or ordinary
-# restarts get the pod killed. Both sides live in different files.
+# The streamer's /healthz fails between ffmpeg restarts, so its liveness
+# window must outlast the longest backoff.
 def seconds(d):
     import re
     total = 0

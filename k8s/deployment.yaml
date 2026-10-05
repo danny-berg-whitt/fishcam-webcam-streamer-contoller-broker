@@ -1,5 +1,4 @@
-# A template: ${...} placeholders are filled from deploy.env by k8s/render.sh
-# (which `make deploy` runs). Don't apply this file directly.
+# Template: `make deploy` fills the ${...} placeholders via k8s/render.sh.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,14 +17,11 @@ spec:
       labels:
         app: webcam
     spec:
-      # Pinned to the node the webcam is plugged into: WEBCAM_NODE_LABEL,
-      # which `make label-node` applies to that node.
+      # The node with the webcam; `make label-node` applies the label.
       nodeSelector:
         ${WEBCAM_NODE_LABEL_KEY}: "${WEBCAM_NODE_LABEL_VALUE}"
-      # For pulling from GHCR while the packages are private (the default
-      # for new packages); create it with `make ghcr-pull-secret`. Once the
-      # packages are public this is unused, and a missing secret only makes
-      # the kubelet log a warning before pulling anonymously.
+      # Only needed for private packages (`make ghcr-pull-secret`); if it's
+      # missing, the kubelet warns and pulls anonymously.
       imagePullSecrets:
         - name: ghcr-pull
       containers:
@@ -40,16 +36,10 @@ spec:
           volumeMounts:
             - { name: dev-video0, mountPath: /dev/video0 }
             - { name: dev-snd, mountPath: /dev/snd }
-          # The streamer's /healthz is 503 whenever ffmpeg isn't running,
-          # including the pauses between restarts. So:
-          # - Liveness only after 60s of continuous failure (6 x 10s). That
-          #   outlasts RESTART_MAX_BACKOFF (30s in the ConfigMap; keep it
-          #   below 60s), so ordinary restarts never trip it, but a pipeline
-          #   that never comes back gets the pod restarted, which re-opens
-          #   the devices.
-          # - No readiness probe, deliberately: an unready streamer would
-          #   make the whole pod unready and cut off the broker, exactly when
-          #   /status should be reporting that the stream is down.
+          # /healthz is 503 whenever ffmpeg is down, including between
+          # restarts. The 60s liveness window must outlast RESTART_MAX_BACKOFF
+          # (CI checks this). No readiness probe: an unready streamer would
+          # cut off the broker just when /status should report the outage.
           startupProbe:
             httpGet: { path: /healthz, port: 8081 }
             periodSeconds: 5
@@ -62,13 +52,10 @@ spec:
         - name: controller
           image: ${REGISTRY}/fishcam-controller:${TAG}
           imagePullPolicy: Always
-          # No Service selects this container's port directly anymore — the
-          # broker reaches it over pod loopback only. Left as a distinct
-          # containerPort for `kubectl port-forward` during troubleshooting.
+          # Not exposed by any Service; declared for `kubectl port-forward`.
           ports:
             - containerPort: 8080
-          # Always 200 while the process serves HTTP; liveness only, since
-          # the broker's readiness already gates traffic to the pod.
+          # Liveness only; the broker's readiness gates traffic.
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
             periodSeconds: 20
@@ -96,8 +83,7 @@ spec:
           imagePullPolicy: Always
           ports:
             - containerPort: 8082
-          # The broker is the pod's only public entry point, so its readiness
-          # decides whether the Service sends traffic here.
+          # The pod's only public entry point.
           readinessProbe:
             httpGet: { path: /healthz, port: 8082 }
             periodSeconds: 10

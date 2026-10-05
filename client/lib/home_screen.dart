@@ -7,8 +7,7 @@ import 'webcam_client.dart';
 const _prefix = '/webcam';
 
 class WebcamHomeScreen extends StatefulWidget {
-  /// The broker's base URL; '' when the build wasn't given one, in which case
-  /// the screen says so and its actions stay disabled.
+  /// The broker's base URL; '' disables the actions (see server_config.dart).
   final String baseUrl;
 
   const WebcamHomeScreen({super.key, required this.baseUrl});
@@ -46,8 +45,8 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
     }
   }
 
-  /// Prompts for the access code if no client is set up yet, persists it,
-  /// and returns a ready client — or null if the person cancelled.
+  /// Returns the client, prompting for and storing an access code first if
+  /// needed; null if the person cancels.
   Future<WebcamClient?> _ensureClient() async {
     if (_client != null) return _client;
     if (!_configured) return null;
@@ -81,8 +80,7 @@ class _WebcamHomeScreenState extends State<WebcamHomeScreen> {
       final result = await action(client);
       setState(() => _lastStatus = result);
     } on WebcamAuthException {
-      // The stored token was rejected (wrong or revoked). Drop it rather
-      // than keep retrying with a token the broker will never accept.
+      // Wrong or revoked: drop it rather than retry forever.
       await _tokenStorage.clear();
       _client?.close();
       setState(() {

@@ -1,14 +1,7 @@
-# Build the FishCam images with podman and publish them to GitHub Container
-# Registry (ghcr.io). Nothing here uses Docker's tools or services.
-#
-#   make login       # once per machine: podman login ghcr.io
-#   make release     # build all three images for the Pi and push them
-#
-# Run `make help` for every target and the current settings.
+# Build, publish and deploy the FishCam images. `make help` lists targets
+# and the current settings.
 
-# Per-deployment settings: the public hostname, the node label, the registry
-# and the tag. Copy deploy.env.example to deploy.env (git-ignored) and edit
-# it; any value can also be given on the command line, e.g. TAG=abc123.
+# Per-deployment settings; see deploy.env.example. Command-line values win.
 -include deploy.env
 
 REGISTRY  ?= localhost
@@ -17,19 +10,17 @@ PLATFORM  ?= linux/arm64
 PODMAN    ?= podman
 GHCR_USER ?= $(notdir $(REGISTRY))
 
-# kubectl on PATH (a workstation whose kubeconfig points at the cluster),
-# else MicroK8s's bundled one when run on the Pi. Override with KUBECTL=...
+# kubectl if installed, else MicroK8s's (on the Pi).
 ifeq ($(origin KUBECTL),undefined)
 KUBECTL := $(shell if command -v kubectl >/dev/null 2>&1; then echo kubectl; \
              elif command -v microk8s >/dev/null 2>&1; then echo microk8s kubectl; \
              else echo kubectl; fi)
 endif
 
-# For k8s/render.sh, which fills the manifests' ${...} placeholders.
+# For k8s/render.sh.
 export WEBCAM_HOST WEBCAM_NODE_LABEL REGISTRY TAG
 
-# Pushing or deploying needs a real registry; `localhost` (the default with
-# no deploy.env) is only good for local builds and `make pod-smoke`.
+# The default `localhost` suits local builds only, not push or deploy.
 require_registry = @if [ "$(REGISTRY)" = localhost ]; then \
 	  echo "REGISTRY isn't set: copy deploy.env.example to deploy.env and set it"; exit 1; fi
 
@@ -76,9 +67,7 @@ help:
 	@echo "  images:"
 	@$(foreach c,$(COMPONENTS),echo "    $(call image,$(c))";)
 
-# A personal access token (classic) with the write:packages scope. With
-# GHCR_TOKEN unset, podman prompts for it instead. Skipped when podman already
-# has a saved login for GHCR_USER.
+# Password: a classic token with write:packages (GHCR_TOKEN, else prompted).
 login:
 	@if user=$$($(PODMAN) login --get-login ghcr.io 2>/dev/null) && [ "$$user" = "$(GHCR_USER)" ]; then \
 	  echo "Already logged in to ghcr.io as $$user."; \
@@ -91,9 +80,8 @@ login:
 rootfs:
 	streamer/fetch-rootfs.sh $(ARCH)
 
-# The streamer's runtime stage runs `apk add` for the target architecture,
-# so build it natively (arm64 on an Apple Silicon Mac or on the Pi) or with
-# emulation. The controller and broker cross-compile and need neither.
+# The streamer's runtime stage needs a native build (or emulation); the
+# others cross-compile.
 build: rootfs
 	@set -e; for c in $(COMPONENTS); do \
 	  echo "==> $$c"; \
@@ -109,9 +97,7 @@ push:
 release: build push
 	-@k8s/check-images.sh $(REGISTRY) $(TAG) $(COMPONENTS)
 
-# The cluster pulls anonymously unless the ghcr-pull secret exists, so on
-# GHCR each package must be public. GitHub has no API for that; this reports
-# the settings page for any that isn't.
+# The cluster pulls anonymously unless the ghcr-pull secret exists.
 check-images:
 	@k8s/check-images.sh $(REGISTRY) $(TAG) $(COMPONENTS)
 
@@ -121,15 +107,11 @@ test:
 	  (cd $$c && go vet ./... && go test -count=1 ./...); \
 	done
 
-# The real broker, controller and streamer binaries, end to end, with
-# stand-ins only for the ffmpeg and amixer the streamer drives.
 e2e:
 	@set -e; bin=$$(mktemp -d); trap 'rm -rf "$$bin"' EXIT; \
 	for c in controller broker streamer; do go build -C $$c -o "$$bin/$$c" .; done; \
 	ci/e2e-smoke.sh "$$bin/controller" "$$bin/broker" "$$bin/streamer"
 
-# The images from `make build`, run as a podman pod wired like the
-# Kubernetes pod. On an Apple Silicon Mac the default linux/arm64 is native.
 pod-smoke:
 	PODMAN="$(PODMAN)" ci/pod-smoke.sh fishcam-pod-smoke \
 	  $(call image,streamer) $(call image,controller) $(call image,broker)
@@ -138,11 +120,7 @@ clean:
 	-@for c in $(COMPONENTS); do $(PODMAN) rmi $(REGISTRY)/fishcam-$$c:$(TAG) 2>/dev/null; done
 	rm -rf streamer/rootfs build
 
-# GHCR packages start out private. Either make them public in each package's
-# settings on GitHub, or give the cluster read access with this secret,
-# which k8s/deployment.yaml references as imagePullSecrets. The token needs
-# only the read:packages scope. (`docker-registry` is kubectl's name for any
-# registry-login secret; no Docker software is involved.)
+# Only for private packages; the token needs only read:packages.
 ghcr-pull-secret:
 	@test -n "$$GHCR_TOKEN" || { echo "usage: GHCR_TOKEN=<token> make ghcr-pull-secret"; exit 1; }
 	$(KUBECTL) create secret docker-registry ghcr-pull \
@@ -150,12 +128,7 @@ ghcr-pull-secret:
 	  --docker-username="$(GHCR_USER)" \
 	  --docker-password="$$GHCR_TOKEN"
 
-# ---------------------------------------------------------------------------
-# Cluster
-# ---------------------------------------------------------------------------
-
-# Refuses to replace an existing secret: rotating HMAC_SECRET is a deliberate
-# act (delete the secret, run this, then restart the deployment).
+# Never replaces an existing secret; rotation is deliberate.
 secret:
 	@if $(KUBECTL) get secret webcam-hmac >/dev/null 2>&1; then \
 	  echo "webcam-hmac already exists; left unchanged."; \
@@ -166,10 +139,7 @@ secret:
 	  echo "created webcam-hmac"; \
 	fi
 
-# Labels the node the pod's nodeSelector looks for (WEBCAM_NODE_LABEL). With
-# NODE=<name>, labels that node. Otherwise: already labelled is a no-op; with
-# one node it labels that one; with several it stops, since only you know
-# which has the camera plugged in.
+# With several nodes and none labelled, NODE=<name> is required.
 label-node:
 	@k8s/render.sh k8s/deployment.yaml >/dev/null
 	@label='$(WEBCAM_NODE_LABEL)'; \
@@ -202,7 +172,6 @@ label-node:
 	  exit 1; \
 	fi
 
-# Fails before anything is changed if the settings are missing or invalid.
 deploy-check:
 	$(require_registry)
 	@k8s/render.sh k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml >/dev/null
@@ -212,8 +181,7 @@ deploy-check:
 	  k8s/check-images.sh $(REGISTRY) $(TAG) $(COMPONENTS); \
 	fi
 
-# Checks the two secrets the pod can't start without, so a missing one fails
-# here with a pointer instead of as CreateContainerConfigError in the pod.
+# Missing secrets fail here, not as CreateContainerConfigError in the pod.
 deploy: deploy-check label-node
 	@missing=0; \
 	for s in webcam-hmac:secret webcam-broker-tokens:broker-init; do \

@@ -1,6 +1,6 @@
-// Command streamer captures audio and video from a USB webcam and publishes
-// an H.264/AAC stream to an RTMP server. It supervises the ffmpeg process
-// and exposes a small internal HTTP API for microphone mute control.
+// Command streamer supervises an ffmpeg process that publishes a USB
+// webcam's audio and video over RTMP, and serves an internal API for muting
+// the microphone.
 package main
 
 import (
@@ -23,9 +23,7 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
-	// Discover whatever was left on "auto". Failing here is fatal by design:
-	// without a camera or a microphone there is nothing to supervise, and a
-	// clear message at startup beats ffmpeg failing in a restart loop.
+	// Fatal by design: a clear message now beats ffmpeg in a restart loop.
 	if err := cfg.Resolve(); err != nil {
 		log.Fatalf("device discovery failed: %v", err)
 	}
@@ -35,9 +33,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// The mute control name is as device-specific as the card id, but unlike
-	// the card it is not needed to stream — so a failure here is a warning,
-	// not a fatal error. Video and audio keep flowing; only /mute is lost.
+	// Not fatal: streaming doesn't need the mute control, only /mute does.
 	if isAuto(cfg.MuteControl) {
 		if ctrl, err := DetectMuteControl(cfg.AlsaCard); err != nil {
 			log.Printf("warning: no mute control detected on card %s: %v", cfg.AlsaCard, err)
@@ -49,8 +45,6 @@ func main() {
 
 	muter := NewMuter(cfg.AlsaCard, cfg.MuteControl)
 	if err := muter.Set(cfg.StartMuted); err != nil {
-		// A missing mixer control should not stop the video stream; log and
-		// carry on so the API can report the failure later.
 		log.Printf("warning: could not set initial mute state: %v", err)
 	}
 

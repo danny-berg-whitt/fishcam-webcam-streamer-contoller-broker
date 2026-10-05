@@ -1,24 +1,13 @@
 #!/usr/bin/env bash
-# Run podman commands from inside an act job container against the host's
-# Podman service. Usage: ci/podman-act.sh <podman arguments...>
-#
-# act's job image has no podman, but act mounts the host's container-engine
-# socket at /var/run/docker.sock (see --container-daemon-socket). This
-# fetches Podman's own static remote client, at the same version the
-# service reports, and points it at that socket. Matching versions avoids
-# client/server API drift; the download is cached under RUNNER_TOOL_CACHE,
-# which act keeps in its persistent act-toolcache volume.
-#
-# Everything runs on the host's Podman: images built here land in the
-# podman machine's store, and containers started here run beside the job
-# container, sharing its (host) network.
+# Run podman inside an act job container against the host's Podman, via the
+# socket act mounts at /var/run/docker.sock. Fetches Podman's static remote
+# client at the service's own version (cached in act's tool cache).
+# Usage: ci/podman-act.sh <podman arguments...>
 set -euo pipefail
 
 socket=${PODMAN_ACT_SOCKET:-/var/run/docker.sock}
 
-# act bind-mounts the path given to --container-daemon-socket (a path inside
-# the podman machine VM) at /var/run/docker.sock in the job container. Each
-# way that can go wrong gets its own message, since they need different fixes.
+# Each way the socket mount can fail gets its own message and fix.
 fail() { printf 'podman-act: %s\n' "$@" >&2; exit 1; }
 selinux_hint="On a podman machine (Fedora CoreOS, SELinux enforcing) the job
   container needs SELinux labelling off to use a bind-mounted socket. Add:

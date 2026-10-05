@@ -1,16 +1,9 @@
-# Kubectl command; the root Makefile auto-detects it (kubectl, or
-# `microk8s kubectl` on the Pi). Standalone use falls back to plain kubectl.
+# Included by the root Makefile, which sets KUBECTL.
 KUBECTL ?= kubectl
 
-# Add to the project's existing Makefile.
-#
-# broker-init: creates the tokens secret with a single user (NAME, default
-#   "admin"); if the secret already exists it changes nothing, so it's safe
-#   to run again, e.g. in `make secret && make broker-init && make deploy`.
-# broker-add-user: adds one more user (there are only ever one or two).
-# Both print the raw token once, and only after it has been stored; the
-# broker never sees or stores it, only its sha256 hash, so this is the only
-# place it's recoverable.
+# Access codes are printed once, only after their hash is stored; the code
+# itself is kept nowhere. broker-init leaves an existing secret alone, so it
+# is safe to re-run.
 
 
 .PHONY: broker-init broker-add-user broker-list-users
@@ -34,10 +27,7 @@ broker-init:
 	echo "it will not be shown again:"; \
 	echo "$$token"
 
-# Usage: make broker-add-user NAME=bob
-# Reads the current users, adds one, and replaces the secret in a single
-# apply, so a failure at any step leaves the existing users untouched and
-# prints no code.
+# Replaces the secret in one apply, so a failure leaves existing users intact.
 broker-add-user:
 	@test -n "$(NAME)" || { echo "usage: make broker-add-user NAME=<name>"; exit 1; }
 	@set -e; \

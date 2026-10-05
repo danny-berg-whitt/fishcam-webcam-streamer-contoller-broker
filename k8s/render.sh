@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
-# Fill in a manifest's ${...} placeholders from the environment and print it.
+# Fill a manifest's ${...} placeholders from the environment (deploy.env,
+# via make) and print it, or with -o write each into <dir>.
 #
 # Usage: k8s/render.sh [-o <dir>] <manifest>...
-#   Without -o, the rendered manifests go to stdout as one YAML stream.
-#   With -o, each is written to <dir>/<file name>.
 #
-# Placeholders and the variables they come from (normally deploy.env, which
-# the Makefile loads and exports):
-#   ${WEBCAM_HOST}              WEBCAM_HOST
-#   ${WEBCAM_NODE_LABEL_KEY}    WEBCAM_NODE_LABEL, the part before '='
-#   ${WEBCAM_NODE_LABEL_VALUE}  WEBCAM_NODE_LABEL, the part after '='
-#   ${REGISTRY}  ${TAG}         REGISTRY, TAG
-#
-# Only the variables a manifest actually uses are required, and each is
-# checked against what Kubernetes accepts, so a missing or malformed value
-# stops here with its name rather than reaching the cluster.
+# ${WEBCAM_NODE_LABEL_KEY} and ${WEBCAM_NODE_LABEL_VALUE} are the two halves
+# of WEBCAM_NODE_LABEL. Only variables a manifest uses are required; each is
+# validated against Kubernetes' rules first.
 set -euo pipefail
 
 die() { echo "render: $*" >&2; exit 1; }
@@ -26,12 +18,10 @@ if [ "${1:-}" = "-o" ]; then
 fi
 [ $# -gt 0 ] || die "usage: k8s/render.sh [-o <dir>] <manifest>..."
 
-# Patterns are kept in variables and used unquoted in [[ =~ ]], the form
-# that behaves the same from bash 3.2 (macOS's /bin/bash) onwards.
-# One DNS label: lowercase alphanumerics and '-', not starting or ending with '-'.
+# Patterns are held in variables and used unquoted in [[ =~ ]], which
+# behaves the same from bash 3.2 (macOS's /bin/bash) on.
 label='[a-z0-9]([-a-z0-9]*[a-z0-9])?'
 dns_re="^$label(\\.$label)*\$"
-# A label key's name part, and a label value (which may also be empty).
 name_re='^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$'
 tag_re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
 registry_re='^[a-z0-9][a-z0-9._:/-]*$'
@@ -88,8 +78,8 @@ for file in "$@"; do
     [[ $text == *"$placeholder"* ]] || continue
     value=$(value_of "$var")
     check "$var" "$value"
-    # check() limits every value to letters, digits and . _ - : / so none of
-    # sed's special characters (| & \\ newline) can reach the replacement.
+    # check() admits only letters, digits and . _ - : / so no sed special
+    # character can reach the replacement.
     text=$(printf '%s\n' "$text" | sed "s|\\\${$var}|$value|g")
   done
   if leftover=$(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' <<<"$text" | sort -u | tr '\n' ' ') && [ -n "$leftover" ]; then

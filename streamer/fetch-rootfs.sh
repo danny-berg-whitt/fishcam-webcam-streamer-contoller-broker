@@ -1,24 +1,17 @@
 #!/usr/bin/env bash
-# Download Alpine's official mini root filesystem for the streamer image and
-# verify it against the SHA-256 checksum Alpine publishes alongside it.
+# Download Alpine's mini root filesystem for the streamer image and verify
+# it against Alpine's published SHA-256.
 #
 #   streamer/fetch-rootfs.sh [amd64|arm64 ...]    (default: this machine's)
 #
-# The Containerfile builds its runtime stage from this tarball with ADD
-# instead of pulling an `alpine` image, so the image has no dependency on
-# Docker Hub or any Docker-published base image. Everything after that is
-# ordinary Alpine: `apk add` installs from Alpine's own package mirrors.
-#
-# ALPINE_BRANCH picks the release branch (default latest-stable, the same
-# thing the old `alpine:3` tag tracked). Pin it for reproducible builds,
-# e.g. ALPINE_BRANCH=v3.22.
+# ALPINE_BRANCH (default latest-stable) pins a release, e.g. v3.22.
 set -euo pipefail
 
 branch=${ALPINE_BRANCH:-latest-stable}
 mirror=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 dest="$(cd "$(dirname "$0")" && pwd)/rootfs"
 
-# Map a container architecture name (as in TARGETARCH) to Alpine's name.
+# TARGETARCH name -> Alpine's.
 alpine_arch() {
   case "$1" in
     amd64 | x86_64) echo x86_64 ;;
@@ -44,10 +37,9 @@ sha256_of() {
   fi
 }
 
-# Print "<file> <sha256>" for the minirootfs entry of a latest-releases.yaml.
-# Alpine's scripts/mkimage-yaml.sh writes each entry as a lone "-" line
-# followed by two-space-indented "key: value" lines (the multi-line desc is
-# indented further, so the anchored patterns below never match inside it).
+# Print "<file> <sha256>" for the minirootfs entry of latest-releases.yaml.
+# Entries are a lone "-" line then two-space-indented "key: value" lines; the
+# multi-line desc is indented further, so the anchored patterns skip it.
 minirootfs_entry() {
   awk '
     function flush() {

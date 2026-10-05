@@ -7,8 +7,7 @@ import (
 	"testing"
 )
 
-// Real output from the C922 on the FishCam Pi: exactly one control, named
-// "Mic" — not "Capture", which is what the code used to assume.
+// A webcam whose one control is named "Mic", not "Capture".
 const c922Scontrols = `Simple mixer control 'Mic',0
 `
 
@@ -81,7 +80,7 @@ func TestHasCaptureSwitch(t *testing.T) {
 	}
 }
 
-// The bug this fixes: the code assumed "Capture", the C922 calls it "Mic".
+// The control is discovered, not assumed to be "Capture".
 func TestDetectMuteControlFindsMic(t *testing.T) {
 	fakeAmixer(t, c922Scontrols, map[string]string{"Mic": c922MicSget})
 
@@ -142,8 +141,7 @@ func TestMuterSetUsesDetectedControl(t *testing.T) {
 	}
 }
 
-// With no control detected, mute must fail loudly rather than silently
-// pretending to have worked.
+// With no control detected, mute must fail rather than appear to work.
 func TestMuterSetWithoutControl(t *testing.T) {
 	m := NewMuter("Webcam", autoValue)
 	if err := m.Set(true); !errors.Is(err, errNoMuteControl) {

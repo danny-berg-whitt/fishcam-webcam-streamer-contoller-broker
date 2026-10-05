@@ -30,9 +30,7 @@ const (
 //	printf '%s\n%s\n%s\n%s' POST /webcam/mute 1700000000 0123456789abcdef \
 //	  | openssl dgst -sha256 -hmac "$testSecret"
 //
-// This is the same pipeline the README documents for calling the
-// Controller by hand, so a match means the broker and the documented
-// scheme agree byte for byte.
+// That is the README's documented scheme, so a match means they agree.
 func TestSignKnownVector(t *testing.T) {
 	got := sign(testSecret, "POST", "/webcam/mute", "1700000000", "0123456789abcdef")
 	want := "7e152a094e744df23688f3a2b0ab3fbf9a47da80015cd9657db70f519f5f58c3"
@@ -109,9 +107,8 @@ func TestLoadConfigRejectsBadTimeout(t *testing.T) {
 	}
 }
 
-// fakeController verifies requests the way the README describes the real
-// Controller doing it — written independently of the broker's sign() so a
-// shared bug can't make both sides agree.
+// fakeController verifies as the README describes, written independently
+// of sign() so a shared bug can't make both sides agree.
 type fakeController struct {
 	mu    sync.Mutex
 	calls []string // "METHOD PATH"
@@ -186,7 +183,7 @@ func TestBrokerEndToEnd(t *testing.T) {
 	cases := []struct {
 		name, method, path, token string
 		wantStatus                int
-		wantForwarded             string // "" = must not reach the Controller
+		wantForwarded             string // "" = must not reach the controller
 	}{
 		{"healthz unauthenticated", "GET", "/healthz", "", 200, ""},
 		{"healthz is not prefixed", "GET", testPrefix + "/healthz", "", 404, ""},

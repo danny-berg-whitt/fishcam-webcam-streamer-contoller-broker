@@ -31,8 +31,7 @@ func newTestAPI(t *testing.T, now time.Time, muted *bool) http.Handler {
 	return NewAPI(NewStreamerClient(upstream.URL, 2*time.Second), auth, "").Handler()
 }
 
-// newTestAPIWithPrefix mounts the API under a path prefix, as it runs behind
-// the cluster ingress at /webcam.
+// newTestAPIWithPrefix mounts the API under a prefix, as deployed.
 func newTestAPIWithPrefix(t *testing.T, now time.Time, muted *bool, prefix string) http.Handler {
 	t.Helper()
 	upstream := fakeStreamer(t, muted)
@@ -159,9 +158,8 @@ func TestPrefixedRouting(t *testing.T) {
 	}
 }
 
-// The whole reason the controller serves the prefix itself rather than
-// sitting behind an ingress rewrite: the signature covers the full path, so
-// a signature computed for /mute must not authorise /webcam/mute.
+// The signature covers the full path, so one computed for /mute must not
+// authorise /webcam/mute.
 func TestPrefixedRoutingRejectsUnprefixedSignature(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	muted := false
@@ -198,8 +196,7 @@ func TestPrefixedRoutingRootIs404(t *testing.T) {
 	}
 }
 
-// The liveness probe stays at the root regardless of prefix — the kubelet
-// hits the pod directly, never the ingress.
+// The liveness probe stays at the root regardless of prefix.
 func TestHealthzUnaffectedByPrefix(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	muted := false

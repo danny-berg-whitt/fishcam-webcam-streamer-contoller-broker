@@ -3,11 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-// These tests stay on the paths that make no network call. The home screen
-// builds its WebcamClient against the production URL, so anything that
-// reaches the client would go to the test binding's stub HttpClient. The
-// request logic itself is covered with a MockClient in
-// webcam_client_test.dart.
+// These tests make no network calls; webcam_client_test.dart covers the
+// requests.
 const _server = 'https://webcam.example';
 
 void main() {

@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// Real /proc/asound/cards content from a Pi with a C922 attached: the
-// built-in headphone and HDMI outputs, plus the webcam.
+// A Pi's headphone and HDMI outputs plus a USB webcam.
 const pi5WithC922 = ` 0 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones
                       bcm2835 Headphones
  1 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0
@@ -15,8 +14,7 @@ const pi5WithC922 = ` 0 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones
                       Generic C922 Pro Stream Webcam at usb-xhci-hcd.1-1.3, high speed
 `
 
-// The same machine with a C270 instead — note the id is "Webcam", derived
-// from that model's USB product string.
+// The same machine with a different webcam, so a different card id.
 const pi4WithC270 = ` 0 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones
                       bcm2835 Headphones
  1 [Webcam         ]: USB-Audio - Webcam C270
@@ -57,8 +55,8 @@ func TestParseSoundCardsEmpty(t *testing.T) {
 	}
 }
 
-// captureOn returns a hasCapture func treating the listed indexes as
-// capture-capable — on a real Pi the HDMI and headphone cards are not.
+// captureOn returns a hasCapture that treats only the listed indexes as
+// capture-capable, as a Pi's HDMI and headphone cards are not.
 func captureOn(indexes ...int) func(int) bool {
 	set := make(map[int]bool, len(indexes))
 	for _, i := range indexes {
@@ -67,8 +65,7 @@ func captureOn(indexes ...int) func(int) bool {
 	return func(i int) bool { return set[i] }
 }
 
-// The point of the whole exercise: the same code, no config change, picks
-// the right card on two machines with different webcams.
+// With no config change, the right card is picked for either webcam.
 func TestSelectCaptureCardAcrossModels(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -108,7 +105,7 @@ func TestSelectCaptureCardIgnoresPlaybackOnly(t *testing.T) {
 	}
 }
 
-// Two microphones is genuinely ambiguous — refuse rather than guess wrong.
+// Two microphones are ambiguous: refuse rather than guess.
 func TestSelectCaptureCardAmbiguous(t *testing.T) {
 	cards, _ := ParseSoundCards(strings.NewReader(twoWebcams))
 	_, err := SelectCaptureCard(cards, "", captureOn(1, 2))

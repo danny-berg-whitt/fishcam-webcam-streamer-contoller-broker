@@ -8,8 +8,7 @@ void main() {
 }
 
 class FishCamApp extends StatelessWidget {
-  /// The broker's base URL, e.g. https://webcam.example.com; '' if the build
-  /// wasn't given one (see server_config.dart).
+  /// e.g. https://webcam.example.com; '' if unconfigured.
   final String baseUrl;
 
   const FishCamApp({super.key, required this.baseUrl});

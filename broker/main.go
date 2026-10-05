@@ -1,10 +1,6 @@
-// Command broker is a thin authenticating proxy in front of the Controller.
-// It replaces "the caller holds HMAC_SECRET" with "the caller holds a
-// per-user bearer token"; the broker is the only component that ever
-// computes an HMAC signature, and the only component with a public
-// listener. It mounts its public paths under ROUTE_PREFIX itself, for the
-// same reason the Controller does: no path-rewriting layer in front of it,
-// so the URL a client calls is the path the broker actually receives.
+// Command broker is the public entry point. It authenticates callers by
+// per-user bearer token and forwards each request to the controller with an
+// HMAC signature it computes itself, so callers never hold HMAC_SECRET.
 package main
 
 import (
@@ -41,29 +37,24 @@ func main() {
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
 }
 
-// newMux wires the broker's routes. Split out of main so tests exercise the
-// exact routing (including ROUTE_PREFIX mounting) that production serves.
+// newMux is separate from main so tests exercise the production routing.
 func newMux(cfg *config, users map[string]string) *http.ServeMux {
 	h := &handler{cfg: cfg, users: users, client: &http.Client{Timeout: cfg.UpstreamTimeout}}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", h.handleHealthz) // unauthenticated liveness, always at root, never prefixed
+	mux.HandleFunc("/healthz", h.handleHealthz) // unauthenticated and never prefixed: probed by the kubelet
 	mux.HandleFunc(cfg.RoutePrefix+"/mute", h.authenticated(h.proxyAction("mute", http.MethodPost)))
 	mux.HandleFunc(cfg.RoutePrefix+"/unmute", h.authenticated(h.proxyAction("unmute", http.MethodPost)))
 	mux.HandleFunc(cfg.RoutePrefix+"/status", h.authenticated(h.proxyAction("status", http.MethodGet)))
 	return mux
 }
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
 type config struct {
 	ListenAddr      string
-	ControllerURL   string // e.g. http://127.0.0.1:8080 — loopback, same pod as the Controller
-	RoutePrefix     string // e.g. /webcam — shared with the Controller's own ROUTE_PREFIX
-	HMACSecret      string // same value as the Controller's HMAC_SECRET
-	TokensFile      string // path to mounted secret: sha256(token) hex -> username
+	ControllerURL   string // pod loopback
+	RoutePrefix     string // must equal the controller's ROUTE_PREFIX
+	HMACSecret      string // must equal the controller's HMAC_SECRET
+	TokensFile      string
 	UpstreamTimeout time.Duration
 }
 
@@ -97,15 +88,8 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// ---------------------------------------------------------------------------
-// User tokens
-// ---------------------------------------------------------------------------
-
-// loadUserTokens reads a JSON object mapping hex-encoded sha256(token) to a
-// display name, e.g. {"a94a8fe5...": "alice"}. Only the hash is stored or
-// held in memory; the raw token is never written to disk by the broker, so
-// a copy of this file or a `kubectl get secret` dump is not itself a usable
-// credential.
+// loadUserTokens reads {"<hex sha256(token)>": "<name>", ...}. Only hashes
+// are stored, so the file is not itself a usable credential.
 func loadUserTokens(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -126,13 +110,9 @@ func hashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
 type handler struct {
 	cfg    *config
-	users  map[string]string // sha256(token) hex -> username
+	users  map[string]string // hex sha256(token) -> name
 	client *http.Client
 }
 
@@ -143,13 +123,9 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 type userCtxKey struct{}
 
-// authenticated validates the bearer token, attaches the resolved username
-// to the request context, and logs the caller's identity before invoking
-// next. There is deliberately no nonce or replay window here — with one or
-// two long-lived tokens, replay protection isn't the property this layer
-// provides; identity and an audit trail are. Replay protection for the
-// signed hop still happens downstream, exactly as before, in the
-// Controller's HMAC check.
+// authenticated resolves the bearer token to a user name for the context
+// and the log. There is no replay protection here; the controller enforces
+// it on the signed hop.
 func (h *handler) authenticated(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -167,8 +143,7 @@ func (h *handler) authenticated(next http.HandlerFunc) http.HandlerFunc {
 		hashed := hashToken(token)
 		var username string
 		var ok bool
-		// Constant-time compare against every stored hash so response
-		// timing doesn't leak which prefix of a guessed token matched.
+		// Constant-time, so timing doesn't reveal a partial match.
 		for storedHash, name := range h.users {
 			if subtle.ConstantTimeCompare([]byte(hashed), []byte(storedHash)) == 1 {
 				username, ok = name, true
@@ -187,13 +162,12 @@ func (h *handler) authenticated(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// proxyAction signs a request for the given Controller action and forwards
-// it, then relays the Controller's response back to the caller verbatim.
+// proxyAction signs and forwards one controller action and relays the
+// response unchanged.
 func (h *handler) proxyAction(action, method string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// The broker signs with its own fixed method, so without this check
-		// an authenticated GET /mute (a link preview, a browser prefetch)
-		// would be forwarded as a signed POST and actually mute the mic.
+		// The signed request always uses `method`, so without this check an
+		// authenticated GET /mute (a link preview, say) would mute the mic.
 		if r.Method != method {
 			w.Header().Set("Allow", method)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -244,10 +218,7 @@ func (h *handler) proxyAction(action, method string) http.HandlerFunc {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Signing — identical scheme to the Controller's verifier
-// ---------------------------------------------------------------------------
-
+// sign must match the controller's verifier.
 func sign(secret, method, path, timestamp, nonce string) string {
 	message := strings.Join([]string{method, path, timestamp, nonce}, "\n")
 	mac := hmac.New(sha256.New, []byte(secret))

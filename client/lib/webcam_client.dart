@@ -1,13 +1,11 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
-/// Client for the FishCam broker's public API. The broker (not this app)
-/// holds HMAC_SECRET and signs every request to the Controller; this client
-/// only ever presents a per-user bearer token issued out-of-band when the
-/// user was provisioned (see README: "Broker: provisioning a user").
+/// Client for the broker's API. It sends only the user's bearer token; the
+/// broker does the HMAC signing.
 class WebcamClient {
   final String baseUrl; // e.g. https://webcam.example.com
-  final String prefix; // e.g. /webcam — must match the broker's ROUTE_PREFIX
+  final String prefix; // must match the broker's ROUTE_PREFIX
   final String userToken;
   final http.Client _http;
 
