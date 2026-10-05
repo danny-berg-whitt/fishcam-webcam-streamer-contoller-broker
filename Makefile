@@ -76,9 +76,12 @@ help:
 	@$(foreach c,$(COMPONENTS),echo "    $(call image,$(c))";)
 
 # A personal access token (classic) with the write:packages scope. With
-# GHCR_TOKEN unset, podman prompts for it instead.
+# GHCR_TOKEN unset, podman prompts for it instead. Skipped when podman already
+# has a saved login for GHCR_USER.
 login:
-	@if [ -n "$$GHCR_TOKEN" ]; then \
+	@if user=$$($(PODMAN) login --get-login ghcr.io 2>/dev/null) && [ "$$user" = "$(GHCR_USER)" ]; then \
+	  echo "Already logged in to ghcr.io as $$user."; \
+	elif [ -n "$$GHCR_TOKEN" ]; then \
 	  printf '%s' "$$GHCR_TOKEN" | $(PODMAN) login ghcr.io -u "$(GHCR_USER)" --password-stdin; \
 	else \
 	  $(PODMAN) login ghcr.io -u "$(GHCR_USER)"; \
